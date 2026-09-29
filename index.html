@@ -417,6 +417,62 @@
                 }
                 return false;
             }
+
+            // Nearest triangle crossed by the ray o + t·d with t > tStart: returns
+            // t (or -1) and leaves the triangle's slot in this.lastSlot.
+            closestHit(ox, oy, oz, dx, dy, dz, tStart) {
+                this.lastSlot = -1;
+                if (!this.root) return -1;
+                if (!this.flat) this._flatten();
+                const F = this.flat, box = F.box, tri = F.tri, stack = F.stack;
+                const invDx = 1 / dx, invDy = 1 / dy, invDz = 1 / dz;
+                let best = Infinity, sp = 0;
+                stack[sp++] = 0;
+                while (sp > 0) {
+                    const ni = stack[--sp], b = ni * 6;
+                    let tmin, tmax, tymin, tymax, tzmin, tzmax;
+                    if (invDx >= 0) { tmin = (box[b] - ox) * invDx; tmax = (box[b+3] - ox) * invDx; }
+                    else { tmin = (box[b+3] - ox) * invDx; tmax = (box[b] - ox) * invDx; }
+                    if (invDy >= 0) { tymin = (box[b+1] - oy) * invDy; tymax = (box[b+4] - oy) * invDy; }
+                    else { tymin = (box[b+4] - oy) * invDy; tymax = (box[b+1] - oy) * invDy; }
+                    if (tmin > tymax || tymin > tmax) continue;
+                    if (tymin > tmin) tmin = tymin;
+                    if (tymax < tmax) tmax = tymax;
+                    if (invDz >= 0) { tzmin = (box[b+2] - oz) * invDz; tzmax = (box[b+5] - oz) * invDz; }
+                    else { tzmin = (box[b+5] - oz) * invDz; tzmax = (box[b+2] - oz) * invDz; }
+                    if (tmin > tzmax || tzmin > tmax) continue;
+                    if (tzmin > tmin) tmin = tzmin;
+                    if (tzmax < tmax) tmax = tzmax;
+                    if (tmax < tStart || tmin > best) continue;
+                    const cnt = F.count[ni];
+                    if (cnt === 0) { stack[sp++] = F.right[ni]; stack[sp++] = ni + 1; continue; }
+                    for (let k = F.first[ni], end = k + cnt; k < end; k++) {
+                        const o = k * 9;
+                        const e1x = tri[o+3], e1y = tri[o+4], e1z = tri[o+5];
+                        const e2x = tri[o+6], e2y = tri[o+7], e2z = tri[o+8];
+                        const px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x;
+                        const det = e1x * px + e1y * py + e1z * pz;
+                        if (det > -1e-12 && det < 1e-12) continue;
+                        const invDet = 1 / det;
+                        const tx = ox - tri[o], ty = oy - tri[o+1], tz = oz - tri[o+2];
+                        const u = (tx * px + ty * py + tz * pz) * invDet;
+                        if (u < 0 || u > 1) continue;
+                        const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x;
+                        const v = (dx * qx + dy * qy + dz * qz) * invDet;
+                        if (v < 0 || u + v > 1) continue;
+                        const t = (e2x * qx + e2y * qy + e2z * qz) * invDet;
+                        if (t > tStart && t < best) { best = t; this.lastSlot = k; }
+                    }
+                }
+                return best === Infinity ? -1 : best;
+            }
+
+            // The three corners of a triangle found by closestHit (this.lastSlot).
+            triangleAt(slot) {
+                const t = this.flat.tri, o = slot * 9;
+                const a = [t[o], t[o+1], t[o+2]];
+                return [a, [a[0] + t[o+3], a[1] + t[o+4], a[2] + t[o+5]], [a[0] + t[o+6], a[1] + t[o+7], a[2] + t[o+8]]];
+            }
         }
 
         // Two-sided Möller–Trumbore: distance t along d, or -1.
@@ -590,8 +646,10 @@
         }
 
         // Edge-split subdivision (SunForm's subdivideToMaxEdge, synchronous).
-        // Children keep the parent's n and cat.
-        function subdivideToMaxEdge(triangles, maxEdgeLength) {
+        // Children keep the parent's n and cat. discard(a, b, c, longestEdge²),
+        // if given, drops a piece (and everything it would split into), so a
+        // large slab is only cut up where it can matter.
+        function subdivideToMaxEdge(triangles, maxEdgeLength, discard) {
             const maxE2 = maxEdgeLength * maxEdgeLength;
             const out = [];
             const stack = triangles.slice();
@@ -606,6 +664,7 @@
                 const ab = (b[0]-a[0])*(b[0]-a[0]) + (b[1]-a[1])*(b[1]-a[1]) + (b[2]-a[2])*(b[2]-a[2]);
                 const bc = (c[0]-b[0])*(c[0]-b[0]) + (c[1]-b[1])*(c[1]-b[1]) + (c[2]-b[2])*(c[2]-b[2]);
                 const ca = (a[0]-c[0])*(a[0]-c[0]) + (a[1]-c[1])*(a[1]-c[1]) + (a[2]-c[2])*(a[2]-c[2]);
+                if (discard && discard(a, b, c, Math.max(ab, bc, ca))) continue;
                 if (ab <= maxE2 && bc <= maxE2 && ca <= maxE2) { out.push(tri); continue; }
                 if (ab >= bc && ab >= ca) {
                     const m = [(a[0]+b[0])/2, (a[1]+b[1])/2, (a[2]+b[2])/2];
@@ -621,16 +680,157 @@
             return out;
         }
 
-        // The room's boundary surfaces as target points: one vertex per
-        // subdivided corner (split by category and face, so corners between
-        // floor and wall keep both), with its share of area. Points in the
-        // room's own window opening (the glass, seen from inside) are
-        // excluded: seeing the glass is not seeing into the room.
-        function buildRoomSurface(space, maxEdge, ap) {
-            const tris = orientRoomTris(space);
-            const totals = [0, 0, 0];
-            for (const t of tris) totals[t.cat] += t.area;
-            const sub = subdivideToMaxEdge(tris, maxEdge);
+        // Area of each surface class of an IfcSpace: the denominators for the
+        // "% of floor / walls / ceiling" figures. Only used when a room is found.
+        function roomTotals(space) {
+            const t = [0, 0, 0];
+            for (const tri of orientRoomTris(space)) t[tri.cat] += tri.area;
+            return { floor: t[0], walls: t[1], ceiling: t[2], total: t[0] + t[1] + t[2] };
+        }
+
+        // Edge-inclusive grid over an aperture (flat [x,y,z,...]), pulled 2 mm
+        // in from the edges so lines through the extreme points don't graze
+        // the reveals. The step is capped at cap cells per side.
+        function edgeGrid(ap, step, cap) {
+            const inset = 0.002;
+            const w = Math.max(ap.w - 2 * inset, 1e-6), h = Math.max(ap.h - 2 * inset, 1e-6);
+            const nu = Math.max(1, Math.min(cap, Math.ceil(w / step - 1e-9)));
+            const nv = Math.max(1, Math.min(cap, Math.ceil(h / step - 1e-9)));
+            const out = [];
+            for (let i = 0; i <= nu; i++) {
+                for (let j = 0; j <= nv; j++) {
+                    const su = (i / nu - 0.5) * w, sv = (j / nv - 0.5) * h;
+                    out.push(ap.c[0] + ap.u[0] * su, ap.c[1] + sv, ap.c[2] + ap.u[2] * su);
+                }
+            }
+            return out;
+        }
+
+        // Could a point P be seen from anywhere on the viewing aperture through
+        // the target aperture? Necessary, not sufficient: P must be in front of
+        // the viewing aperture and beyond the target's plane, and the shadow of
+        // the target rectangle cast from P onto the viewer's plane must overlap
+        // the viewing rectangle (grown by pad). This is the test that decides
+        // which surface to measure, so the extent is exact, not sampled.
+        function mayBeSeen(P, vAp, tAp, tCorners, pad) {
+            const vn = vAp.n, vc = vAp.c;
+            const pv = (P[0] - vc[0]) * vn[0] + (P[1] - vc[1]) * vn[1] + (P[2] - vc[2]) * vn[2];
+            if (pv <= 0) return false;
+            if ((P[0] - tAp.c[0]) * tAp.n[0] + (P[1] - tAp.c[1]) * tAp.n[1] + (P[2] - tAp.c[2]) * tAp.n[2] >= 0) return false;
+            let umin = Infinity, umax = -Infinity, wmin = Infinity, wmax = -Infinity;
+            for (let k = 0; k < 4; k++) {
+                const q = tCorners[k];
+                const dx = q[0] - P[0], dy = q[1] - P[1], dz = q[2] - P[2];
+                const dn = dx * vn[0] + dy * vn[1] + dz * vn[2];
+                if (dn >= -1e-12) return true;          // the shadow runs off to infinity
+                const sc = -pv / dn;
+                const rx = P[0] + dx * sc - vc[0], ry = P[1] + dy * sc - vc[1], rz = P[2] + dz * sc - vc[2];
+                const u = rx * vAp.u[0] + rz * vAp.u[2];
+                if (u < umin) umin = u; if (u > umax) umax = u;
+                if (ry < wmin) wmin = ry; if (ry > wmax) wmax = ry;
+            }
+            return umax >= -vAp.w / 2 - pad && umin <= vAp.w / 2 + pad && wmax >= -vAp.h / 2 - pad && wmin <= vAp.h / 2 + pad;
+        }
+
+        // How deep the wall is round an opening, measured on the room side of
+        // the aperture plane: from just outside each edge of the aperture, along
+        // the line into the room, to the first face crossed (the wall's inner
+        // face). The faces of the opening itself (jambs, head, cill) lie inside
+        // this depth; they are not part of the room, so they are not measured.
+        function revealDepth(bvh, tAp) {
+            let depth = 0;
+            const out = 0.025;
+            for (const [su, sv] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+                const o = v3add(tAp.c, v3add(v3scale(tAp.u, su * (tAp.w / 2 + out)), v3scale(tAp.v, sv * (tAp.h / 2 + out))));
+                const t = bvh.closestHit(o[0], o[1], o[2], -tAp.n[0], -tAp.n[1], -tAp.n[2], 1e-4);
+                if (t > 0 && t < 1.0) depth = Math.max(depth, t);
+            }
+            return depth;
+        }
+
+        // Finds the surfaces that are painted and measured. Lines run from a
+        // spread of points over the viewing aperture (corners included)
+        // through a 50 mm grid over the target aperture. Every line that gets
+        // through unblocked lands on the first surface beyond the opening, and
+        // those triangles are the candidates. Each is cut up to maxEdge where
+        // mayBeSeen says a point on it could be seen, and oriented towards the
+        // viewer, so surfaces the lines only graze at their far edges are
+        // still measured to their true extent.
+        function discoverSurface(bvh, vAp, tAp, maxEdge, viewerStep) {
+            const V = edgeGrid(vAp, Math.max(viewerStep, 0.1), 12), T = edgeGrid(tAp, 0.05, 40);
+            const nV = V.length / 3, nT = T.length / 3;
+            const tn = tAp.n, tCorners = apertureCorners(tAp);
+            const hits = new Map();
+            let landed = 0;
+            const box = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+            for (let i = 0; i < nV; i++) {
+                const ax = V[i * 3], ay = V[i * 3 + 1], az = V[i * 3 + 2];
+                for (let j = 0; j < nT; j++) {
+                    const dx = T[j * 3] - ax, dy = T[j * 3 + 1] - ay, dz = T[j * 3 + 2] - az;
+                    if (dx * tn[0] + dy * tn[1] + dz * tn[2] >= 0) continue;
+                    if (bvh.segmentBlocked(ax, ay, az, dx, dy, dz)) continue;
+                    const t = bvh.closestHit(ax, ay, az, dx, dy, dz, 1 + 1e-4);
+                    if (t < 0) continue;
+                    landed++;
+                    const p = [ax + dx * t, ay + dy * t, az + dz * t];
+                    let h = hits.get(bvh.lastSlot);
+                    if (!h) { h = { min: p.slice(), max: p.slice(), dir: [dx, dy, dz] }; hits.set(bvh.lastSlot, h); }
+                    for (let k = 0; k < 3; k++) {
+                        if (p[k] < h.min[k]) h.min[k] = p[k];
+                        if (p[k] > h.max[k]) h.max[k] = p[k];
+                        if (p[k] < box.min[k]) box.min[k] = p[k];
+                        if (p[k] > box.max[k]) box.max[k] = p[k];
+                    }
+                }
+            }
+            const pad = Math.max(0.05, maxEdge);
+            const revealD = revealDepth(bvh, tAp);
+            const key = (p) => Math.round(p[0] * 1e4) + ',' + Math.round(p[1] * 1e4) + ',' + Math.round(p[2] * 1e4);
+            const seen = new Set();
+            const tris = [];
+            for (const [slot, h] of hits) {
+                const c = bvh.triangleAt(slot);
+                const cr = v3cross(v3sub(c[1], c[0]), v3sub(c[2], c[0]));
+                const len = v3len(cr);
+                if (len < 1e-10) continue;
+                let n = v3scale(cr, 1 / len);
+                if (v3dot(n, h.dir) > 0) n = v3scale(n, -1);
+                const tri = [c[0], c[1], c[2]];
+                tri.n = n;
+                tri.cat = n[1] > 0.7 ? CAT_FLOOR : n[1] < -0.7 ? CAT_CEIL : CAT_WALL;
+                // Big pieces are only cut up near where lines landed (2 m either
+                // side); small ones are kept or dropped by mayBeSeen at their corners.
+                const lo = h.min.map(x => x - 2), hi = h.max.map(x => x + 2);
+                const discard = (a, b, cc, L2) => {
+                    if (L2 > 0.25) {
+                        for (let k = 0; k < 3; k++) if (Math.max(a[k], b[k], cc[k]) < lo[k] || Math.min(a[k], b[k], cc[k]) > hi[k]) return true;
+                        return false;
+                    }
+                    const mid = [(a[0] + b[0] + cc[0]) / 3, (a[1] + b[1] + cc[1]) / 3, (a[2] + b[2] + cc[2]) / 3];
+                    return !(mayBeSeen(a, vAp, tAp, tCorners, pad) || mayBeSeen(b, vAp, tAp, tCorners, pad)
+                          || mayBeSeen(cc, vAp, tAp, tCorners, pad) || mayBeSeen(mid, vAp, tAp, tCorners, pad));
+                };
+                for (const sub of subdivideToMaxEdge([tri], maxEdge, discard)) {
+                    // The opening's own reveal (parallel to the sight line, inside the wall's depth).
+                    if (Math.abs(v3dot(n, tn)) < 0.5) {
+                        const mid = v3scale(v3add(v3add(sub[0], sub[1]), sub[2]), 1 / 3);
+                        if (-v3dot(v3sub(mid, tAp.c), tn) < revealD + 0.005) continue;
+                    }
+                    // Coincident faces (double-sided or overlapping IFC elements) count once.
+                    const ks = [key(sub[0]), key(sub[1]), key(sub[2])].sort().join('|');
+                    if (seen.has(ks)) continue;
+                    seen.add(ks);
+                    tris.push(sub);
+                }
+            }
+            return { tris: tris, landed: landed, surfaces: hits.size, box: landed ? box : null, revealDepth: revealD };
+        }
+
+        // Shared-vertex surface from subdivided triangles: one vertex per
+        // corner (split by class and normal, so a floor/wall corner keeps
+        // both), with its third of each adjacent triangle's area. samples
+        // are the test points, 20 mm off the surface towards the viewer.
+        function buildSurfaceFromSubTris(sub) {
             const key2i = new Map();
             const pos = [], nrm = [], cats = [], areas = [];
             const index = new Uint32Array(sub.length * 3);
@@ -655,52 +855,42 @@
                 }
             }
             const count = cats.length;
-            const positions = new Float32Array(pos), normals = new Float32Array(nrm);
             const samples = new Float32Array(count * 3);
-            const valid = new Uint8Array(count);
             for (let i = 0; i < count; i++) {
-                const p = [pos[i*3], pos[i*3+1], pos[i*3+2]], n = [nrm[i*3], nrm[i*3+1], nrm[i*3+2]];
-                samples[i*3] = p[0] + n[0] * SAMPLE_OFFSET;
-                samples[i*3+1] = p[1] + n[1] * SAMPLE_OFFSET;
-                samples[i*3+2] = p[2] + n[2] * SAMPLE_OFFSET;
-                valid[i] = 1;
-                if (ap && cats[i] === CAT_WALL && Math.abs(v3dot(n, ap.n)) > 0.9) {
-                    const r = v3sub(p, ap.c);
-                    if (Math.abs(v3dot(r, ap.n)) < 1.0 && Math.abs(v3dot(r, ap.u)) < ap.w / 2 + 0.05
-                        && Math.abs(r[1]) < ap.h / 2 + 0.05) valid[i] = 0;
-                }
+                samples[i * 3] = pos[i * 3] + nrm[i * 3] * SAMPLE_OFFSET;
+                samples[i * 3 + 1] = pos[i * 3 + 1] + nrm[i * 3 + 1] * SAMPLE_OFFSET;
+                samples[i * 3 + 2] = pos[i * 3 + 2] + nrm[i * 3 + 2] * SAMPLE_OFFSET;
             }
             return {
-                positions: positions, normals: normals, index: index,
-                cats: new Uint8Array(cats), areas: new Float32Array(areas),
-                samples: samples, valid: valid, vertexCount: count,
-                totals: { floor: totals[0], walls: totals[1], ceiling: totals[2], total: totals[0] + totals[1] + totals[2] },
+                positions: new Float32Array(pos), normals: new Float32Array(nrm), index: index,
+                cats: new Uint8Array(cats), areas: new Float32Array(areas), samples: samples, vertexCount: count,
             };
         }
 
-        // Standing positions on a grid over the room's floor triangles.
-        function standingGrid(space, step) {
-            const floor = orientRoomTris(space).filter(t => t.cat === CAT_FLOOR);
-            if (!floor.length) return new Float64Array(0);
-            let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
-            for (const t of floor) for (const p of t) {
-                x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]);
-                z0 = Math.min(z0, p[2]); z1 = Math.max(z1, p[2]);
-            }
+        // Standing positions, found from the model rather than a room: cells
+        // of a grid (aligned to the world, so A and B share positions) over
+        // the plan footprint of where the sight lines land, on the room side
+        // of the aperture and in line of sight of it at the aperture's
+        // height, with a floor found by dropping a line down and clear
+        // head-room above it.
+        function deriveStanding(bvh, tAp, box, step, personHeight) {
+            if (!box) return new Float64Array(0);
+            const tc = tAp.c, tn = tAp.n;
+            let x0 = box.min[0], x1 = box.max[0], z0 = box.min[2], z1 = box.max[2];
+            for (const c of apertureCorners(tAp)) { x0 = Math.min(x0, c[0]); x1 = Math.max(x1, c[0]); z0 = Math.min(z0, c[2]); z1 = Math.max(z1, c[2]); }
             const out = [];
-            for (let x = x0 + step / 2; x < x1; x += step) {
-                for (let z = z0 + step / 2; z < z1; z += step) {
-                    for (const t of floor) {
-                        const a = t[0], b = t[1], c = t[2];
-                        const d = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
-                        if (Math.abs(d) < 1e-12) continue;
-                        const l1 = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / d;
-                        const l2 = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / d;
-                        const l3 = 1 - l1 - l2;
-                        if (l1 < -1e-9 || l2 < -1e-9 || l3 < -1e-9) continue;
-                        out.push(x, l1 * a[1] + l2 * b[1] + l3 * c[1], z);
-                        break;
-                    }
+            for (let x = Math.floor(x0 / step) * step + step / 2; x < x1 + step / 2; x += step) {
+                for (let z = Math.floor(z0 / step) * step + step / 2; z < z1 + step / 2; z += step) {
+                    if ((x - tc[0]) * tn[0] + (z - tc[2]) * tn[2] > -0.05) continue;
+                    if (bvh.segmentBlocked(tc[0], tc[1], tc[2], x - tc[0], 0, z - tc[2])) continue;
+                    const t = bvh.closestHit(x, tc[1], z, 0, -1, 0, 1e-6);
+                    if (t < 0 || t > 4) continue;
+                    const c = bvh.triangleAt(bvh.lastSlot);
+                    const n = v3norm(v3cross(v3sub(c[1], c[0]), v3sub(c[2], c[0])));
+                    if (Math.abs(n[1]) < 0.7) continue;
+                    const fy = tc[1] - t;
+                    if (bvh.segmentBlocked(x, fy + 0.03, z, 0, personHeight - 0.03, 0)) continue;
+                    out.push(x, fy, z);
                 }
             }
             return new Float64Array(out);
@@ -796,58 +986,82 @@
         }
 
         // ─── THE RUN ───
-        // job = { blockPos, blockIdx, deadlineMs, dirs: [{ name, viewer, target,
-        //         viewerStep, targets, targetValid, persons }] }
-        // For each direction: fraction per target point (0..1; -1 excluded;
-        // -2 not reached before the deadline) and personVis per person point
-        // (1 visible, 0 not, -1 not reached).
+        // job = { blockPos, blockIdx, deadlineMs, viewerStep, targetSub, standStep,
+        //         personHeight, hStep, dirs: [{ name, viewer, target }] }  (metres)
+        // For each direction it finds the surfaces the sight lines land on, the
+        // standing positions, and then, for every surface point and person
+        // point, the share of viewer points that see it: fraction (0..1; -2 not
+        // reached before the deadline) and personVis (1 visible, 0 not, -1 not
+        // reached), with personShare the share of viewer points that see each
+        // person point. res.bundle holds the 16 corner-to-corner lines.
         function computeVisibility(job, hooks) {
             hooks = hooks || {};
             const now = hooks.now || (() => Date.now());
             const progress = hooks.progress || (() => {});
             const t0 = now();
             const deadline = job.deadlineMs;
-            const res = { dirs: [], stopped: null, timings: {}, viewerCounts: [] };
-            let totalWork = 0, done = 0;
+            const nH = Math.max(1, Math.round(job.personHeight / job.hStep));
+            const res = { dirs: [], stopped: null, timings: {}, viewerCounts: [], bundle: null };
             for (const d of job.dirs) {
-                const nT = d.targets.length / 3, nP = d.persons.length / 3;
-                totalWork += nT + nP;
-                res.dirs.push({ fraction: new Float32Array(nT).fill(-2), personVis: new Int8Array(nP).fill(-1) });
+                res.dirs.push({
+                    surface: { positions: new Float32Array(0), normals: new Float32Array(0), index: new Uint32Array(0),
+                               cats: new Uint8Array(0), areas: new Float32Array(0), vertexCount: 0 },
+                    fraction: new Float32Array(0), standing: new Float64Array(0), nH: nH, hStep: job.personHeight / nH,
+                    personVis: new Int8Array(0), personShare: new Float32Array(0), landed: 0, surfaces: 0, revealDepth: 0,
+                });
             }
             const overDeadline = () => now() - t0 >= deadline;
-            if (overDeadline()) {
-                res.stopped = { dir: 0, part: 'room surfaces', done: 0, total: job.dirs.length ? job.dirs[0].targets.length / 3 : 0 };
-                return res;
-            }
+            if (overDeadline()) { res.stopped = { dir: 0, part: 'finding the surfaces', done: 0, total: 0 }; return res; }
             let t = now();
             const bvh = new BVH(job.blockPos, job.blockIdx);
             res.timings.bvh = now() - t;
+            res.bundle = sightBundle(job.dirs[0].viewer, job.dirs[0].target, bvh);
+
+            const prep = [];
+            let totalWork = 0, done = 0;
+            for (let di = 0; di < job.dirs.length; di++) {
+                if (overDeadline()) { res.stopped = { dir: di, part: 'finding the surfaces', done: 0, total: 0 }; return res; }
+                const d = job.dirs[di], out = res.dirs[di];
+                t = now();
+                const disc = discoverSurface(bvh, d.viewer, d.target, job.targetSub, job.viewerStep);
+                const surf = buildSurfaceFromSubTris(disc.tris);
+                const standing = deriveStanding(bvh, d.target, disc.box, job.standStep, job.personHeight);
+                const pp = personPoints(standing, job.personHeight, job.hStep);
+                res.timings[d.name + ' find surfaces'] = now() - t;
+                out.surface = { positions: surf.positions, normals: surf.normals, index: surf.index, cats: surf.cats, areas: surf.areas, vertexCount: surf.vertexCount };
+                out.fraction = new Float32Array(surf.vertexCount).fill(-2);
+                out.standing = standing; out.nH = pp.nH; out.hStep = pp.step;
+                out.personVis = new Int8Array(pp.points.length / 3).fill(-1);
+                out.personShare = new Float32Array(pp.points.length / 3).fill(-1);
+                out.landed = disc.landed; out.surfaces = disc.surfaces; out.revealDepth = disc.revealDepth;
+                const grid = apertureGrid(d.viewer, job.viewerStep);
+                res.viewerCounts.push(grid.count);
+                prep.push({ samples: surf.samples, persons: pp.points, grid: grid, tCorners: apertureCorners(d.target) });
+                totalWork += surf.vertexCount + pp.points.length / 3;
+            }
             let lastReport = -1;
             const report = (label) => {
-                const f = totalWork ? done / totalWork : 1;
+                const f = totalWork ? 0.05 + 0.95 * done / totalWork : 1;
                 if (f - lastReport >= 0.01 || f >= 1) { lastReport = f; progress(f, label); }
             };
             for (let di = 0; di < job.dirs.length; di++) {
-                const d = job.dirs[di], out = res.dirs[di];
-                const grid = apertureGrid(d.viewer, d.viewerStep);
-                const tCorners = apertureCorners(d.target);
-                const nV = grid.count;
-                res.viewerCounts.push(nV);
-                const T = d.targets, nT = T.length / 3;
+                const d = job.dirs[di], out = res.dirs[di], pr = prep[di];
+                const T = pr.samples, nT = T.length / 3, nV = pr.grid.count;
                 t = now();
                 for (let i = 0; i < nT; i++) {
                     if (overDeadline()) { res.stopped = { dir: di, part: 'room surfaces', done: i, total: nT }; return res; }
-                    if (d.targetValid && !d.targetValid[i]) { out.fraction[i] = -1; }
-                    else out.fraction[i] = countViewers(grid, d.target, tCorners, bvh, T[i*3], T[i*3+1], T[i*3+2], false) / nV;
+                    out.fraction[i] = countViewers(pr.grid, d.target, pr.tCorners, bvh, T[i*3], T[i*3+1], T[i*3+2], false) / nV;
                     done++;
-                    report(d.name + ': room surfaces');
+                    report(d.name + ': surfaces');
                 }
                 res.timings[d.name + ' surfaces'] = now() - t;
-                const P = d.persons, nP = P.length / 3;
+                const P = pr.persons, nP = P.length / 3;
                 t = now();
                 for (let i = 0; i < nP; i++) {
                     if (overDeadline()) { res.stopped = { dir: di, part: 'standing positions', done: i, total: nP }; return res; }
-                    out.personVis[i] = countViewers(grid, d.target, tCorners, bvh, P[i*3], P[i*3+1], P[i*3+2], true) ? 1 : 0;
+                    const c = countViewers(pr.grid, d.target, pr.tCorners, bvh, P[i*3], P[i*3+1], P[i*3+2], false);
+                    out.personShare[i] = c / pr.grid.count;
+                    out.personVis[i] = c > 0 ? 1 : 0;
                     done++;
                     report(d.name + ': standing positions');
                 }
@@ -878,29 +1092,44 @@
         const KIND_LABELS = { none: 'not visible', whole: 'whole person', head: 'head down', feet: 'feet up', middle: 'middle band' };
 
         // ─── NUMBERS ───
+        // o.totals (the room's own surface areas, from an IfcSpace) is optional:
+        // without it the percentages and room areas are null.
         function summariseDirection(o) {
             const s = o.surface, f = o.fraction;
-            const vis = [0, 0, 0];
+            const vis = [0, 0, 0], wgt = [0, 0, 0], half = [0, 0, 0];
             let reachedT = 0;
             for (let i = 0; i < s.vertexCount; i++) {
                 if (f[i] !== -2) reachedT++;
-                if (f[i] > 0) vis[s.cats[i]] += s.areas[i];
+                if (f[i] > 0) {
+                    vis[s.cats[i]] += s.areas[i];
+                    wgt[s.cats[i]] += s.areas[i] * f[i];              // each spot counted by the share of the window that sees it
+                    if (f[i] >= 0.5) half[s.cats[i]] += s.areas[i];   // seen from at least half the window
+                }
             }
-            const tot = s.totals;
-            const pct = (a, b) => b > 0 ? a / b * 100 : 0;
-            const visible = { floor: vis[0], walls: vis[1], ceiling: vis[2], total: vis[0] + vis[1] + vis[2] };
-            const visiblePct = {
+            const cats = (a) => ({ floor: a[0], walls: a[1], ceiling: a[2], total: a[0] + a[1] + a[2] });
+            const tot = o.totals || null;
+            const pct = (a, b) => tot && b > 0 ? a / b * 100 : null;
+            const visible = cats(vis), weighted = cats(wgt), visibleHalf = cats(half);
+            const visiblePct = tot ? {
                 floor: pct(vis[0], tot.floor), walls: pct(vis[1], tot.walls),
                 ceiling: pct(vis[2], tot.ceiling), total: pct(visible.total, tot.total),
-            };
+            } : { floor: null, walls: null, ceiling: null, total: null };
             // person
             const nH = o.nH, step = o.hStep, pos = o.standing, nP = pos.length / 3;
-            let reached = 0, anyC = 0, headC = 0, wholeC = 0, worst = null;
+            const cell = o.standStep * o.standStep;
+            let reached = 0, anyC = 0, headC = 0, wholeC = 0, worst = null, personEquiv = 0;
             const tc = o.targetAp.c, tn = o.targetAp.n, tu = o.targetAp.u;
             for (let k = 0; k < nP; k++) {
                 const bits = o.personVis.subarray(k * nH, k * nH + nH);
                 if (bits[nH - 1] === -1) continue;
                 reached++;
+                // Mean visible length over the viewer points (exact: it is linear in the per-height shares).
+                let mean = 0;
+                if (o.personShare) {
+                    const sh = o.personShare.subarray(k * nH, k * nH + nH);
+                    for (let j = 0; j < nH; j++) if (sh[j] > 0) mean += sh[j] * step;
+                    personEquiv += cell * mean / (nH * step);
+                }
                 const cls = classifyPerson(bits, step);
                 if (cls.length > 0) anyC++;
                 if (bits[nH - 1] > 0) headC++;
@@ -910,25 +1139,24 @@
                     const r = v3sub(p, tc);
                     const distIn = -(r[0] * tn[0] + r[2] * tn[2]);
                     if (!worst || cls.length > worst.length + 1e-9 || (Math.abs(cls.length - worst.length) < 1e-9 && distIn < worst.distIn)) {
-                        worst = { length: cls.length, kind: cls.kind, pos: p, distIn: distIn,
+                        worst = { length: cls.length, kind: cls.kind, pos: p, distIn: distIn, mean: o.personShare ? mean : null,
                                   lateral: r[0] * tu[0] + r[2] * tu[2], bits: Array.from(bits) };
                     }
                 }
             }
-            const fa = tot.floor;
-            const share = (c) => reached ? c / reached : 0;
+            const fa = tot ? tot.floor : 0;
+            const area = (c) => ({ area: c * cell, pct: fa > 0 ? c * cell / fa * 100 : null });
             const between = v3sub(o.viewerAp.c, tc);
             const dist = v3len(between);
             const cosA = Math.abs(v3dot(v3norm(between), tn));
             return {
                 viewerApertureArea: o.viewerAp.w * o.viewerAp.h,
                 targetApertureArea: o.targetAp.w * o.targetAp.h,
-                floorArea: tot.floor, surfaceArea: tot.total, totals: tot,
-                visible: visible, visiblePct: visiblePct,
+                floorArea: tot ? tot.floor : null, surfaceArea: tot ? tot.total : null, totals: tot,
+                visible: visible, visiblePct: visiblePct, weighted: weighted, visibleHalf: visibleHalf,
                 centreDist: dist, angleOffSquare: Math.acos(Math.min(1, cosA)) * 180 / Math.PI,
-                personAny: { area: share(anyC) * fa, pct: share(anyC) * 100 },
-                personHead: { area: share(headC) * fa, pct: share(headC) * 100 },
-                personWhole: { area: share(wholeC) * fa, pct: share(wholeC) * 100 },
+                personAny: area(anyC), personHead: area(headC), personWhole: area(wholeC),
+                personWeighted: { area: personEquiv, pct: fa > 0 ? personEquiv / fa * 100 : null },
                 standingCount: nP, standingReached: reached,
                 targetsReached: reachedT, targetCount: s.vertexCount,
                 worst: worst,
@@ -936,33 +1164,19 @@
         }
 
         // ─── SIGHT-LINE BUNDLE ───
-        // Where a line from o along d leaves the room (the space mesh). If o
-        // is outside the room the first crossing is the way in, so the second
-        // is the way out.
-        function rayExitFromRoom(o, d, space) {
-            const ts = [];
-            for (const t of space.tris) {
-                const h = rayTriangleT(o, d, t[0], t[1], t[2]);
-                if (h > 1e-7) ts.push(h);
-            }
-            ts.sort((a, b) => a - b);
-            const uniq = [];
-            for (const h of ts) if (!uniq.length || h - uniq[uniq.length - 1] > 1e-6) uniq.push(h);
-            const inside = pointInMesh(o, space.tris, space.bbox);
-            const h = inside ? uniq[0] : uniq[1];
-            return h === undefined ? null : v3add(o, v3scale(d, h));
-        }
-
-        // The 16 corner-to-corner lines, each extended into both rooms.
-        function sightBundle(ap1, ap2, room1, room2) {
+        // The 16 corner-to-corner lines, each extended into both rooms until it
+        // lands on the first surface (in the model, the picked windows aside).
+        function sightBundle(ap1, ap2, bvh) {
             const c1 = apertureCorners(ap1), c2 = apertureCorners(ap2);
             const lines = [];
             for (const p of c1) for (const q of c2) {
-                const d = v3norm(v3sub(q, p));
+                const d = v3sub(q, p);
+                const tf = bvh.closestHit(p[0], p[1], p[2], d[0], d[1], d[2], 1 + 1e-4);
+                const tb = bvh.closestHit(p[0], p[1], p[2], -d[0], -d[1], -d[2], 1e-4);
                 lines.push({
                     a: p, b: q,
-                    intoRoom2: room2 ? rayExitFromRoom(q, d, room2) : null,
-                    intoRoom1: room1 ? rayExitFromRoom(p, v3scale(d, -1), room1) : null,
+                    intoRoom2: tf > 0 ? v3add(p, v3scale(d, tf)) : null,
+                    intoRoom1: tb > 0 ? v3sub(p, v3scale(d, tb)) : null,
                 });
             }
             return { lines: lines, corners1: c1, corners2: c2 };
@@ -1004,7 +1218,6 @@
             showRooms: true,         // ghost the two picked IfcSpaces (all others are always hidden)
         };
         const resultCache = new Map();
-        const surfaceCache = new Map();
         let pickOverlay = null;
         let activeWorker = null, activeReject = null;
         let fadeAnim = null, fadeLoop = false;
@@ -1227,7 +1440,7 @@
                 disposeModel(S.base); disposeModel(S.cmp);
                 S.base = m; S.cmp = null; S.comparison = null; S.omit = [];
                 S.picks = { w1: null, w2: null };
-                clearResultGroups(); resultCache.clear(); surfaceCache.clear();
+                clearResultGroups(); resultCache.clear();
                 S.results = null; S.view = 'setup'; S.showing = 'base'; S.mode = 'idle'; S.lockedView = null;
                 controls.enabled = true;
                 scene.add(m.group);
@@ -1239,10 +1452,10 @@
                 fn.textContent = file.name; fn.style.display = 'block';
                 const info = document.getElementById('model-info');
                 info.innerHTML = m.elements.size + ' elements, ' + m.windowCount + ' windows/doors, ' + m.spaces.length + ' IfcSpaces.'
-                    + ' IfcSpaces are hidden; only the two picked rooms are shown, faintly.'
+                    + (m.spaces.length ? ' IfcSpaces are hidden; the two picked rooms are shown faintly.' : '')
                     + (Object.keys(m.hidden).length ? ' Also hidden and ignored: ' + Object.entries(m.hidden).map(([t, n]) => n + ' ' + t).join(', ') + '.' : '')
                     + (m.failed ? ' <span class="warn">' + m.failed + ' element(s) could not be read and were skipped.</span>' : '')
-                    + (m.spaces.length ? '' : ' <span class="err">No IfcSpaces: SightLine finds rooms from IfcSpaces, so it cannot run on this model.</span>');
+                    + (m.spaces.length ? '' : ' <span class="muted">No IfcSpaces: that is fine. SightLine measures the surfaces the sight lines land on; IfcSpaces only add room names and the percentage figures.</span>');
                 offerRestore();
                 setStatus('');
             } catch (err) {
@@ -1325,9 +1538,6 @@
             } else {
                 if (e1) out.w1 = resolveSingle(apertureFromPoints(elementPoints(e1)), model.spaces);
                 if (e2) out.w2 = resolveSingle(apertureFromPoints(elementPoints(e2)), model.spaces);
-            }
-            for (const [k, w] of [['1', out.w1], ['2', out.w2]]) {
-                if (w && !w.room) out.errors.push('No IfcSpace found behind Window ' + k + ' (looked 300 mm to 1 m in from the frame centreline on both sides). SightLine needs the room modelled as an IfcSpace.');
             }
             if (out.w1 && out.w2 && out.w1.room && out.w1.room === out.w2.room) out.errors.push('Both windows open into the same IfcSpace. Pick one window on each building.');
             return out;
@@ -1438,7 +1648,7 @@
                 if (!w) continue;
                 pickOverlay.add(apertureOutline(w.ap, DIR_COLOURS[k], 1));
                 if (w.room && S.showRooms) pickOverlay.add(roomGhost(w.room, DIR_COLOURS[k], 0.14));
-                const lab = 'W' + k + ': ' + (e.name || 'window') + (w.room ? '  →  ' + spaceLabel(w.room) : '  →  no room found');
+                const lab = 'W' + k + ': ' + (e.name || 'window') + (w.room ? '  →  ' + spaceLabel(w.room) : '');
                 const s = makeLabel(lab, DIR_COLOURS[k]);
                 s.position.set(w.ap.c[0], w.ap.c[1] + w.ap.h / 2 + 0.5, w.ap.c[2]);
                 pickOverlay.add(s);
@@ -1557,14 +1767,8 @@
             return [sc.model.seq, p('w1'), p('w2'), sc.omit.slice().sort().join(','), JSON.stringify(S.settings)].join('|');
         }
 
-        function roomSurface(model, space, ap) {
-            const key = model.seq + '|' + space.expressID + '|' + S.settings.targetSub + '|' + ap.c.map(x => x.toFixed(4)).join(',') + '|' + ap.n.map(x => x.toFixed(3)).join(',');
-            if (!surfaceCache.has(key)) surfaceCache.set(key, buildRoomSurface(space, S.settings.targetSub / 1000, ap));
-            return surfaceCache.get(key);
-        }
-
-        // Everything except the two picked windows, the IfcSpaces (never in
-        // model.elements) and anything omitted.
+        // Everything except the two picked windows and anything omitted. Volumes
+        // (IfcSpace and friends) are never in model.elements, so never block.
         function blockerArrays(model, skip) {
             let nv = 0, ni = 0;
             const use = [];
@@ -1598,23 +1802,20 @@
             const skip = new Set([a.e1, a.e2]);
             for (const gid of sc.omit) { const el = sc.model.byGid.get(gid); if (el) skip.add(el); }
             const t0 = performance.now();
-            const surf2 = roomSurface(sc.model, a.w2.room, a.w2.ap);
-            const surf1 = roomSurface(sc.model, a.w1.room, a.w1.ap);
             const st = S.settings;
-            const stand2 = standingGrid(a.w2.room, st.standGrid / 1000), stand1 = standingGrid(a.w1.room, st.standGrid / 1000);
-            const pp2 = personPoints(stand2, st.personHeight, st.heightStep / 1000);
-            const pp1 = personPoints(stand1, st.personHeight, st.heightStep / 1000);
             const blockers = blockerArrays(sc.model, skip);
             const prepMs = performance.now() - t0;
             const job = {
                 blockPos: blockers.pos, blockIdx: blockers.idx,
                 deadlineMs: st.deadline * 1000,
+                viewerStep: st.viewerGrid / 1000, targetSub: st.targetSub / 1000, standStep: st.standGrid / 1000,
+                personHeight: st.personHeight, hStep: st.heightStep / 1000,
                 dirs: [
-                    { name: 'Room 2 from Window 1', viewer: a.w1.ap, target: a.w2.ap, viewerStep: st.viewerGrid / 1000, targets: surf2.samples, targetValid: surf2.valid, persons: pp2.points },
-                    { name: 'Room 1 from Window 2', viewer: a.w2.ap, target: a.w1.ap, viewerStep: st.viewerGrid / 1000, targets: surf1.samples, targetValid: surf1.valid, persons: pp1.points },
+                    { name: 'Room 2 from Window 1', viewer: a.w1.ap, target: a.w2.ap },
+                    { name: 'Room 1 from Window 2', viewer: a.w2.ap, target: a.w1.ap },
                 ],
             };
-            return { sc: sc, a: a, surf: { 1: surf1, 2: surf2 }, stand: { 1: stand1, 2: stand2 }, pp: { 1: pp1, 2: pp2 }, job: job, prepMs: prepMs, blockerCount: blockers.count };
+            return { sc: sc, a: a, job: job, prepMs: prepMs, blockerCount: blockers.count };
         }
 
         function runJob(job, onProgress) {
@@ -1624,7 +1825,8 @@
                     const src = CORE_SRC + '\nself.onmessage = function (e) {\n'
                         + '  var res = computeVisibility(e.data, { now: function () { return performance.now(); },\n'
                         + '    progress: function (f, t) { self.postMessage({ type: "progress", f: f, text: t }); } });\n'
-                        + '  var tr = []; res.dirs.forEach(function (d) { tr.push(d.fraction.buffer, d.personVis.buffer); });\n'
+                        + '  var tr = []; res.dirs.forEach(function (d) { tr.push(d.fraction.buffer, d.personVis.buffer, d.personShare.buffer, d.standing.buffer,\n'
+                        + '    d.surface.positions.buffer, d.surface.normals.buffer, d.surface.index.buffer, d.surface.cats.buffer, d.surface.areas.buffer); });\n'
                         + '  self.postMessage({ type: "result", res: res }, tr);\n};\n';
                     w = new Worker(URL.createObjectURL(new Blob([src], { type: 'application/javascript' })));
                 } catch (e) {
@@ -1654,16 +1856,19 @@
                 { k: 1, viewerAp: a.w2.ap, targetAp: a.w1.ap, room: a.w1.room, viewerEl: a.e2, targetEl: a.e1 },
             ].map((d, i) => {
                 const r = res.dirs[i];
+                // The room's own surface areas, when an IfcSpace was found: the denominators for the percentages.
+                const totals = d.room ? (d.room.totals || (d.room.totals = roomTotals(d.room))) : null;
                 const summary = summariseDirection({
-                    surface: prep.surf[d.k], fraction: r.fraction, personVis: r.personVis,
-                    standing: prep.stand[d.k], nH: prep.pp[d.k].nH, hStep: prep.pp[d.k].step,
-                    viewerAp: d.viewerAp, targetAp: d.targetAp,
+                    surface: r.surface, fraction: r.fraction, personVis: r.personVis, personShare: r.personShare,
+                    standing: r.standing, nH: r.nH, hStep: r.hStep, standStep: st.standGrid / 1000,
+                    viewerAp: d.viewerAp, targetAp: d.targetAp, totals: totals,
                 });
-                return Object.assign(d, { fraction: r.fraction, personVis: r.personVis, summary: summary, surface: prep.surf[d.k], nH: prep.pp[d.k].nH, hStep: prep.pp[d.k].step });
+                return Object.assign(d, { fraction: r.fraction, personVis: r.personVis, summary: summary, surface: r.surface, nH: r.nH, hStep: r.hStep,
+                                          landed: r.landed, surfaces: r.surfaces });
             });
             return {
                 key: prep.sc.key, model: prep.sc.model, a: a, dirs: dirs,
-                bundle: sightBundle(a.w1.ap, a.w2.ap, a.w1.room, a.w2.room),
+                bundle: res.bundle,
                 stopped: res.stopped, viewerCounts: res.viewerCounts, timings: res.timings,
             };
         }
@@ -1683,13 +1888,14 @@
                     const key = scenarioCacheKey(sc);
                     let data = resultCache.get(key);
                     if (!data) {
-                        setProgress(i / scs.length, tag + 'preparing room surfaces and blockers');
+                        setProgress(i / scs.length, tag + 'preparing the blocking geometry');
                         await new Promise(r => setTimeout(r, 20));
                         const prep = prepareScenario(sc);
                         console.log('[SightLine] ' + (sc.key === 'M' ? 'Model' : sc.label) + ': prepared in ' + prep.prepMs.toFixed(0) + ' ms: '
-                            + prep.blockerCount + ' blocking elements, ' + prep.surf[2].vertexCount + ' + ' + prep.surf[1].vertexCount + ' room points, '
-                            + (prep.job.dirs[0].persons.length + prep.job.dirs[1].persons.length) / 3 + ' person points');
+                            + prep.blockerCount + ' blocking elements');
                         const res = await runJob(prep.job, (f, text) => setProgress((i + f) / scs.length, tag + text));
+                        console.log('[SightLine] ' + (sc.key === 'M' ? 'Model' : sc.label) + ': '
+                            + res.dirs.map((d, i) => 'direction ' + (i + 1) + ' landed on ' + d.surfaces + ' surface triangle(s), ' + d.surface.vertexCount + ' points, ' + d.standing.length / 3 + ' standing positions').join('; '));
                         console.log('[SightLine] ' + (sc.key === 'M' ? 'Model' : sc.label) + ' stage times (ms):',
                             Object.fromEntries(Object.entries(res.timings).map(([k, v]) => [k, Math.round(v)])));
                         data = finishScenario(prep, res);
@@ -1777,6 +1983,7 @@
 
         function bundleGroup(bundle) {
             const g = new THREE.Group();
+            if (!bundle) return g;
             const between = [], ext = [];
             for (const l of bundle.lines) {
                 between.push(V3(l.a), V3(l.b));
@@ -1871,9 +2078,10 @@
             }
             rooms.add(apertureOutline(r.a.w1.ap, DIR_COLOURS[1], 1), apertureOutline(r.a.w2.ap, DIR_COLOURS[2], 1));
             const spaces = new THREE.Group(); spaces.name = 'spaces';
-            spaces.add(roomGhost(r.a.w1.room, DIR_COLOURS[1], 0.04), roomGhost(r.a.w2.room, DIR_COLOURS[2], 0.04));
+            if (r.a.w1.room) spaces.add(roomGhost(r.a.w1.room, DIR_COLOURS[1], 0.04));
+            if (r.a.w2.room) spaces.add(roomGhost(r.a.w2.room, DIR_COLOURS[2], 0.04));
             for (const [k, w, e] of [[1, r.a.w1, r.a.e1], [2, r.a.w2, r.a.e2]]) {
-                const s = makeLabel('W' + k + ': ' + (e.name || 'window') + '\n' + spaceLabel(w.room), DIR_COLOURS[k], 0.8);
+                const s = makeLabel('W' + k + ': ' + (e.name || 'window') + (w.room ? '\n' + spaceLabel(w.room) : ''), DIR_COLOURS[k], 0.8);
                 s.position.set(w.ap.c[0], w.ap.c[1] + w.ap.h / 2 + 0.6, w.ap.c[2]);
                 rooms.add(s);
             }
@@ -1970,7 +2178,13 @@
             if (!S.results) return;
             const r = S.results.scenarios[0];
             const box = new THREE.Box3();
-            for (const sp of [r.a.w1.room, r.a.w2.room]) { box.expandByPoint(V3(sp.bbox.min)); box.expandByPoint(V3(sp.bbox.max)); }
+            for (const ap of [r.a.w1.ap, r.a.w2.ap]) for (const c of apertureCorners(ap)) box.expandByPoint(V3(c));
+            for (const d of r.dirs) {
+                const P = d.surface.positions;
+                for (let i = 0; i < P.length; i += 3) box.expandByPoint(new THREE.Vector3(P[i], P[i + 1], P[i + 2]));
+            }
+            if (r.bundle) for (const l of r.bundle.lines) for (const e of [l.intoRoom1, l.intoRoom2]) if (e) box.expandByPoint(V3(e));
+            box.expandByScalar(0.3);
             const centre = box.getCenter(new THREE.Vector3());
             const radius = box.getSize(new THREE.Vector3()).length() / 2;
             const c1 = r.a.w1.ap.c, c2 = r.a.w2.ap.c;
@@ -2027,31 +2241,37 @@
 
         // ─── NUMBERS ───
         const f2 = (x) => x.toFixed(2);
-        const fmtArea = (x) => f2(x) + ' m²';
+        const fmtArea = (x) => x == null ? '—' : f2(x) + ' m²';
         const fmtMm = (x) => Math.round(x * 1000).toLocaleString('en-GB') + ' mm';
-        const fmtPct = (x) => x.toFixed(1) + '%';
+        const fmtPct = (x, of) => x == null ? '' : '<span class="sub">' + x.toFixed(1) + '% of ' + of + '</span>';
 
         function numberRows(dirIndex) {
             const vk = dirIndex === 0 ? 1 : 2, tk = dirIndex === 0 ? 2 : 1;
-            const area = (get) => ({ value: s => get(s).area, text: s => fmtArea(get(s).area) + '<span class="sub">' + fmtPct(get(s).pct) + ' of floor</span>', unit: 'm²' });
-            const vis = (k, of) => ({ value: s => s.visible[k], text: s => fmtArea(s.visible[k]) + '<span class="sub">' + fmtPct(s.visiblePct[k]) + ' of ' + of + '</span>', unit: 'm²' });
+            const area = (get) => ({ value: s => get(s).area, text: s => fmtArea(get(s).area) + fmtPct(get(s).pct, 'floor'), unit: 'm²' });
+            const vis = (k, of) => ({ value: s => s.visible[k], text: s => fmtArea(s.visible[k]) + fmtPct(s.visiblePct[k], of), unit: 'm²' });
             return [
                 { label: 'Window ' + vk + ' aperture', value: s => s.viewerApertureArea, text: s => fmtArea(s.viewerApertureArea), unit: 'm²' },
                 { label: 'Window ' + tk + ' aperture', value: s => s.targetApertureArea, text: s => fmtArea(s.targetApertureArea), unit: 'm²' },
-                { label: 'Room ' + tk + ' floor area', value: s => s.floorArea, text: s => fmtArea(s.floorArea), unit: 'm²' },
-                { label: 'Room ' + tk + ' surface area', value: s => s.surfaceArea, text: s => fmtArea(s.surfaceArea), unit: 'm²' },
+                { label: 'Room ' + tk + ' floor area (IfcSpace)', value: s => s.floorArea, text: s => fmtArea(s.floorArea), unit: 'm²' },
+                { label: 'Room ' + tk + ' surface area (IfcSpace)', value: s => s.surfaceArea, text: s => fmtArea(s.surfaceArea), unit: 'm²' },
                 Object.assign({ label: 'Visible floor' }, vis('floor', 'floor')),
                 Object.assign({ label: 'Visible walls' }, vis('walls', 'walls')),
                 Object.assign({ label: 'Visible ceiling' }, vis('ceiling', 'ceiling')),
-                Object.assign({ label: 'Visible total' }, vis('total', 'surface')),
+                Object.assign({ label: 'Visible total (from any point of the window)' }, vis('total', 'surface')),
+                { label: 'Visible total, weighted', value: s => s.weighted.total,
+                  text: s => fmtArea(s.weighted.total) + '<span class="sub">each spot counted by the share of the window that sees it</span>', unit: 'm²' },
+                { label: 'Seen from at least half the window', value: s => s.visibleHalf.total, text: s => fmtArea(s.visibleHalf.total), unit: 'm²' },
                 { label: 'Centre to centre', value: s => s.centreDist, text: s => fmtMm(s.centreDist), unit: 'mm', scale: 1000 },
                 { label: 'Angle off square at Window ' + tk, value: s => s.angleOffSquare, text: s => s.angleOffSquare.toFixed(1) + '°', unit: '°' },
                 Object.assign({ label: 'Floor where any part of a person is visible' }, area(s => s.personAny)),
                 Object.assign({ label: 'Floor where the head is visible' }, area(s => s.personHead)),
                 Object.assign({ label: 'Floor where the whole person is visible' }, area(s => s.personWhole)),
+                { label: 'Person, weighted', value: s => s.personWeighted.area,
+                  text: s => fmtArea(s.personWeighted.area) + '<span class="sub">floor × the average share of a person that shows</span>', unit: 'm²' },
                 { label: 'Worst position', worst: true,
                   value: s => s.worst ? s.worst.length : 0,
-                  text: s => s.worst ? fmtMm(s.worst.length) + '<span class="sub">' + KIND_LABELS[s.worst.kind] + '</span><span class="sub">'
+                  text: s => s.worst ? fmtMm(s.worst.length) + '<span class="sub">' + KIND_LABELS[s.worst.kind] + '</span>'
+                        + (s.worst.mean != null ? '<span class="sub">on average across the window: ' + fmtMm(s.worst.mean) + '</span>' : '') + '<span class="sub">'
                         + f2(s.worst.distIn) + ' m in, ' + f2(Math.abs(s.worst.lateral)) + ' m ' + (s.worst.lateral >= 0 ? 'right' : 'left') + ' looking out</span>' : '0 mm<span class="sub">not visible</span>',
                   unit: 'mm', scale: 1000 },
             ];
@@ -2059,6 +2279,7 @@
 
         function changeCell(row, a, b) {
             const va = row.value(a), vb = row.value(b), sc = row.scale || 1;
+            if (va == null || vb == null) return '<span class="muted">—</span>';
             const diff = vb - va;
             if (Math.abs(diff * sc) < 0.005) return '<span class="muted">no change</span>';
             let abs;
@@ -2085,15 +2306,16 @@
                     const d = r.dirs[r.stopped.dir] || r.dirs[0];
                     const done = r.stopped.done.toLocaleString('en-GB'), tot = r.stopped.total.toLocaleString('en-GB');
                     html += '<div class="notice">' + (scs.length > 1 ? esc(r.label) + ': ' : '') + 'stopped at the ' + S.settings.deadline + ' s deadline in <b>'
-                        + (r.stopped.dir === 0 ? 'Room 2 from Window 1' : 'Room 1 from Window 2') + '</b>, ' + r.stopped.part + ': ' + done + ' of ' + tot
-                        + ' points done' + (r.stopped.dir > 0 ? ' (Room 2 from Window 1 finished)' : '') + '. The figures below are partial. Raise the deadline or coarsen the grids in Settings.</div>';
+                        + (r.stopped.dir === 0 ? 'Room 2 from Window 1' : 'Room 1 from Window 2') + '</b>, ' + r.stopped.part
+                        + (r.stopped.total ? ': ' + done + ' of ' + tot + ' points done' : ', before anything was measured')
+                        + (r.stopped.dir > 0 && r.stopped.total ? ' (Room 2 from Window 1 finished)' : '') + '. The figures below are partial. Raise the deadline or coarsen the grids in Settings.</div>';
                 }
                 if (r.a.notes && r.a.notes.length) html += '<div class="notice">' + r.a.notes.map(esc).join('<br>') + '</div>';
             }
             for (let di = 0; di < 2; di++) {
                 const first = scs[0].dirs[di];
                 const tk = di === 0 ? 2 : 1, vk = di === 0 ? 1 : 2;
-                html += '<div class="dir-title">Room ' + tk + ' (' + esc(spaceLabel(first.room)) + ') seen from Window ' + vk + ' (' + esc(first.viewerEl.name || 'window') + ')</div>';
+                html += '<div class="dir-title">Room ' + tk + (first.room ? ' (' + esc(spaceLabel(first.room)) + ')' : '') + ' seen from Window ' + vk + ' (' + esc(first.viewerEl.name || 'window') + ')</div>';
                 html += '<table class="nums"><tr><th></th>';
                 for (const r of scs) html += '<th data-key="' + r.key + '">' + esc(r.key === 'M' ? 'Model' : r.label) + '</th>';
                 if (scs.length > 1) html += '<th>Change (B against A)</th>';
@@ -2107,7 +2329,7 @@
                 html += '</table>';
             }
             const vc = scs[0].viewerCounts;
-            html += '<div class="muted" style="margin-top:6px; font-size:11px;">Viewer points per window: ' + (vc || []).join(' and ') + '. Target points on ' + S.settings.targetSub + ' mm subdivision; standing grid ' + S.settings.standGrid + ' mm; person ' + S.settings.personHeight.toFixed(2) + ' m tested every ' + S.settings.heightStep + ' mm.</div>';
+            html += '<div class="muted" style="margin-top:6px; font-size:11px;">Viewer points per window: ' + (vc || []).join(' and ') + '. Surfaces are found by the sight lines and measured on a ' + S.settings.targetSub + ' mm subdivision; standing grid ' + S.settings.standGrid + ' mm; person ' + S.settings.personHeight.toFixed(2) + ' m tested every ' + S.settings.heightStep + ' mm.</div>';
             body.innerHTML = html;
             body.classList.remove('muted');
         }
@@ -2127,14 +2349,14 @@
             if (!el) return '<span class="err">Picked window (GlobalId ' + p.globalId + ') is not in this model.</span>';
             let s = '<b>' + (el.name || '(unnamed)') + '</b> · ' + el.typeName;
             if (w) s += '<br>Aperture ' + (w.ap.w).toFixed(2) + ' × ' + (w.ap.h).toFixed(2) + ' m';
-            s += w && w.room ? '<br>Room: <b>' + spaceLabel(w.room) + '</b>' : '<br><span class="err">No IfcSpace found behind this window.</span>';
+            s += w && w.room ? '<br>Room: <b>' + spaceLabel(w.room) + '</b>' : '<br><span class="muted">No IfcSpace behind this window: the surfaces are found from what the sight lines land on.</span>';
             return s;
         }
 
         function refreshPanel() {
             const has = !!S.base;
             document.getElementById('cmp-offer').style.display = has ? 'block' : 'none';
-            document.getElementById('card-windows').classList.toggle('disabled', !has || !S.base.spaces.length);
+            document.getElementById('card-windows').classList.toggle('disabled', !has);
             document.getElementById('save-session-btn').disabled = !has;
             document.getElementById('open-session-btn').disabled = !has;
             document.getElementById('card-model').classList.toggle('done', has);

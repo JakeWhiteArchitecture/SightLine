@@ -4,7 +4,7 @@
 // tests read it straight out of the page, so they check the same code the
 // browser and its Web Worker run.
 //
-// Run:  node --test tests/
+// Run:  node --test tests/core.test.js
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -16,15 +16,17 @@ const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 const src = html.match(/<script id="sightline-core">([\s\S]*?)<\/script>/)[1];
 const ctx = vm.createContext({});
 vm.runInContext(src + `
-;this.core = { BVH, apertureFromPoints, resolvePair, buildRoomSurface, standingGrid, personPoints,
-  computeVisibility, summariseDirection, classifyPerson, sightBundle, pointInMesh, trisBBox, CAT_WALL };`, ctx);
+;this.core = { BVH, apertureFromPoints, resolvePair, roomTotals, computeVisibility, summariseDirection,
+  classifyPerson, sightBundle, trisBBox, discoverSurface };`, ctx);
 const C = ctx.core;
 
 // ── Synthetic scene, Y up, metres ─────────────────────────────────────────
 // Two single-room buildings face each other across a 12 m gap between their
-// front walls (12.3 m between the window centrelines). Room 1 lies at z > 0, room 2 at z < -12.3. Each room is
-// 4 m wide (x 0..4, building 2 shifted by `shift2`), 5 m deep, 2.6 m high,
-// with a window in the middle of a 300 mm front wall.
+// front walls (12.3 m between the window centrelines). Room 1 lies at z > 0,
+// room 2 at z < -12.3. Each room is 4 m wide (x 0..4, building 2 shifted by
+// `shift2`), 5 m deep, 2.6 m high, with a window in the middle of a 300 mm
+// front wall. Nothing here is an IfcSpace except b.space, which the tests
+// only use for names and percentages: the surfaces come from the sight lines.
 
 function boxTris(x0, y0, z0, x1, y1, z1) {
     const v = [[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0], [x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]];
@@ -60,6 +62,10 @@ function scene(o = {}) {
     const solids = b1.solids.concat(b2.solids);
     // A screen across the gap, 2 m high, halfway between the buildings.
     if (o.screen) solids.push([-2, -0.3, -6.1, 6, 2.0, -6.0]);
+    // Louvres: 100 mm slats with 100 mm gaps across the gap, 2 m high, halfway between the buildings.
+    if (o.slats) for (let x = -2; x < 6; x += 0.2) solids.push([x, -0.3, -6.1, x + 0.1, 2.0, -6.0]);
+    // A 1 m high block of furniture in the middle of room 2.
+    if (o.block) solids.push([1.4, 0, -16.0, 2.6, 1.0, -15.0]);
     const tris = solids.flatMap(s => boxTris(...s));
     const pos = new Float32Array(tris.flat().flat());
     const idx = new Uint32Array(tris.length * 3).map((_, i) => i);
@@ -70,36 +76,34 @@ const SETTINGS = { viewer: 0.1, target: 0.1, stand: 0.25, height: 1.7, hstep: 0.
 
 function run(sc, opts = {}) {
     const st = Object.assign({}, SETTINGS, opts);
-    const spaces = [sc.b1.space, sc.b2.space];
+    const spaces = opts.noSpaces ? [] : [sc.b1.space, sc.b2.space];
     const pair = C.resolvePair(C.apertureFromPoints(sc.b1.windowPts), C.apertureFromPoints(sc.b2.windowPts), spaces);
-    assert.ok(pair.w1.room && pair.w2.room, 'both rooms found');
-    const surf2 = C.buildRoomSurface(pair.w2.room, st.target, pair.w2.ap);
-    const surf1 = C.buildRoomSurface(pair.w1.room, st.target, pair.w1.ap);
-    const stand2 = C.standingGrid(pair.w2.room, st.stand), stand1 = C.standingGrid(pair.w1.room, st.stand);
-    const pp2 = C.personPoints(stand2, st.height, st.hstep), pp1 = C.personPoints(stand1, st.height, st.hstep);
+    if (!opts.noSpaces) assert.ok(pair.w1.room && pair.w2.room, 'both rooms found');
     const job = {
         blockPos: sc.pos, blockIdx: sc.idx, deadlineMs: opts.deadlineMs === undefined ? 1e9 : opts.deadlineMs,
+        viewerStep: st.viewer, targetSub: st.target, standStep: st.stand, personHeight: st.height, hStep: st.hstep,
         dirs: [
-            { name: 'd0', viewer: pair.w1.ap, target: pair.w2.ap, viewerStep: st.viewer, targets: surf2.samples, targetValid: surf2.valid, persons: pp2.points },
-            { name: 'd1', viewer: pair.w2.ap, target: pair.w1.ap, viewerStep: st.viewer, targets: surf1.samples, targetValid: surf1.valid, persons: pp1.points },
+            { name: 'd0', viewer: pair.w1.ap, target: pair.w2.ap },
+            { name: 'd1', viewer: pair.w2.ap, target: pair.w1.ap },
         ],
     };
     const res = C.computeVisibility(job);
-    const sum = (i, surf, stand, pp, v, t) => C.summariseDirection({
-        surface: surf, fraction: res.dirs[i].fraction, personVis: res.dirs[i].personVis,
-        standing: stand, nH: pp.nH, hStep: pp.step, viewerAp: v, targetAp: t });
+    const sum = (i, viewerAp, targetAp, room) => C.summariseDirection({
+        surface: res.dirs[i].surface, fraction: res.dirs[i].fraction, personVis: res.dirs[i].personVis, personShare: res.dirs[i].personShare,
+        standing: res.dirs[i].standing, nH: res.dirs[i].nH, hStep: res.dirs[i].hStep, standStep: st.stand,
+        viewerAp, targetAp, totals: room ? C.roomTotals(room) : null });
     return {
-        pair, res, surf2,
-        s: [sum(0, surf2, stand2, pp2, pair.w1.ap, pair.w2.ap), sum(1, surf1, stand1, pp1, pair.w2.ap, pair.w1.ap)],
+        pair, res, job,
+        s: [sum(0, pair.w1.ap, pair.w2.ap, pair.w2.room), sum(1, pair.w2.ap, pair.w1.ap, pair.w1.room)],
     };
 }
 
-// Painted points on room 2's back wall (normal pointing +z, into the room).
+// Painted points on room 2's back wall (normal pointing +z, towards the viewer).
 function backWallPaint(r) {
-    const s = r.surf2, f = r.res.dirs[0].fraction;
+    const s = r.res.dirs[0].surface, f = r.res.dirs[0].fraction;
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, area = 0, cx = 0;
     for (let i = 0; i < s.vertexCount; i++) {
-        if (s.normals[i * 3 + 2] < 0.9 || !(f[i] > 0)) continue;
+        if (s.normals[i * 3 + 2] < 0.9 || s.positions[i * 3 + 2] > -17.2 || !(f[i] > 0)) continue;
         const x = s.positions[i * 3], y = s.positions[i * 3 + 1];
         minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
         area += s.areas[i]; cx += x * s.areas[i];
@@ -112,7 +116,8 @@ const FIGURES = s => ({
     any: s.personAny.area, head: s.personHead.area, whole: s.personWhole.area, worst: s.worst ? s.worst.length : 0,
 });
 
-const base = run(scene());
+const baseScene = scene();
+const base = run(baseScene);
 
 test('apertures and rooms are found, normals face each other', () => {
     const { w1, w2 } = base.pair;
@@ -121,6 +126,22 @@ test('apertures and rooms are found, normals face each other', () => {
     assert.ok(w1.ap.n[2] < -0.99 && w2.ap.n[2] > 0.99, 'normals point out of the rooms');
     assert.ok(Math.abs(base.s[0].centreDist - 12.3) < 1e-6);
     assert.ok(base.s[0].angleOffSquare < 0.01);
+});
+
+test('the surfaces are found by the sight lines, not from a room', () => {
+    const d = base.res.dirs[0];
+    // Painted points are all inside room 2 (beyond window 2's frame plane, in front of the back wall),
+    // and none of them is the opening's own jamb, head or cill.
+    let n = 0;
+    for (let i = 0; i < d.surface.vertexCount; i++) {
+        if (!(d.fraction[i] > 0)) continue;
+        n++;
+        const x = d.surface.positions[i * 3], y = d.surface.positions[i * 3 + 1], z = d.surface.positions[i * 3 + 2];
+        assert.ok(z <= -12.3 + 0.03 && z >= -17.3 - 0.03 && x >= -0.03 && x <= 4.03 && y >= -0.03 && y <= 2.63,
+            `painted point (${x}, ${y}, ${z}) is inside room 2`);
+    }
+    assert.ok(n > 500 && d.landed > 100 && d.surfaces >= 3 && d.standing.length > 0);
+    assert.ok(Math.abs(d.revealDepth === undefined ? 0.15 : d.revealDepth - 0.15) < 0.01);
 });
 
 test('square on: painted area on the back wall matches the hand projection within one grid cell', () => {
@@ -141,9 +162,42 @@ test('square on: painted area on the back wall matches the hand projection withi
     assert.ok(Math.abs(p.area - expected) <= cell * 2 * ((x1 - x0) + (2.6 - y0)), `area ${p.area} vs ${expected}`);
 });
 
+test('works without any IfcSpace: same figures, no room-based percentages', () => {
+    const r = run(baseScene, { noSpaces: true });
+    for (const d of [0, 1]) {
+        assert.deepEqual(FIGURES(r.s[d]), FIGURES(base.s[d]));
+        assert.equal(r.s[d].visiblePct.total, null);
+        assert.equal(r.s[d].floorArea, null);
+        assert.equal(r.s[d].personAny.pct, null);
+        assert.ok(base.s[d].visiblePct.total > 0 && base.s[d].personAny.pct > 0, 'with a room the percentages are there');
+    }
+});
+
+test('real surfaces are measured: furniture in the room is painted and shades what is behind it', () => {
+    const r = run(scene({ block: true }));
+    const s = r.res.dirs[0].surface, f = r.res.dirs[0].fraction;
+    let blockFace = 0, blockTop = 0;
+    for (let i = 0; i < s.vertexCount; i++) {
+        if (!(f[i] > 0)) continue;
+        const x = s.positions[i * 3], y = s.positions[i * 3 + 1], z = s.positions[i * 3 + 2];
+        if (Math.abs(z + 15) < 1e-4 && s.normals[i * 3 + 2] > 0.9 && y <= 1.0 + 1e-6) blockFace++;
+        if (Math.abs(y - 1.0) < 1e-4 && s.normals[i * 3 + 1] > 0.9 && z > -16 - 1e-6 && z < -15 + 1e-6) blockTop++;
+    }
+    assert.ok(blockFace > 20, `the block's face is painted (${blockFace} points)`);
+    assert.ok(blockTop > 5, `the block's top is painted (${blockTop} points)`);
+    assert.ok(backWallPaint(r).area < backWallPaint(base).area, 'the back wall is shaded by the block');
+    // Up-facing surfaces count as floor: what is visible is the top of the block, 1.2 x 1.0 m.
+    assert.ok(Math.abs(r.s[0].visible.floor - 1.2) < 0.15, `visible floor ${r.s[0].visible.floor}`);
+});
+
 test('the two directions are symmetric for a symmetric scene', () => {
     const a = FIGURES(base.s[0]), b = FIGURES(base.s[1]);
-    for (const k of Object.keys(a)) assert.ok(Math.abs(a[k] - b[k]) < 0.02 * Math.max(1, a[k]), `${k}: ${a[k]} vs ${b[k]}`);
+    // The standing grid is aligned to the world, so the two rooms' cells fall
+    // slightly differently: allow a cell or two on the person figures.
+    for (const k of Object.keys(a)) {
+        const tol = ['any', 'head', 'whole'].includes(k) ? 0.08 : 0.02;
+        assert.ok(Math.abs(a[k] - b[k]) <= tol * Math.max(1, a[k]), `${k}: ${a[k]} vs ${b[k]}`);
+    }
 });
 
 test('oblique: moving one window sideways shrinks the painted area and shifts it', () => {
@@ -222,12 +276,42 @@ test('deadline 0 returns straight away with the stop reported', () => {
     assert.equal(r.s[0].targetsReached, 0);
 });
 
-test('sight-line bundle: 16 lines, each extended to the far side of both rooms', () => {
-    const b = C.sightBundle(base.pair.w1.ap, base.pair.w2.ap, base.pair.w1.room, base.pair.w2.room);
+test('sight-line bundle: 16 lines, each extended to the first surface it lands on in both rooms', () => {
+    const bvh = new C.BVH(baseScene.pos, baseScene.idx);
+    const b = C.sightBundle(base.pair.w1.ap, base.pair.w2.ap, bvh);
     assert.equal(b.lines.length, 16);
     for (const l of b.lines) {
         assert.ok(l.intoRoom2 && l.intoRoom1);
         assert.ok(l.intoRoom2[2] < -12.29 && l.intoRoom2[2] >= -17.3 - 1e-6, 'lands inside room 2');
         assert.ok(l.intoRoom1[2] > 0.29 && l.intoRoom1[2] <= 5.3 + 1e-6, 'lands inside room 1');
+    }
+    // A block in the way stops the lines that reach it, short of the back wall.
+    const bs = scene({ block: true });
+    const b2 = C.sightBundle(base.pair.w1.ap, base.pair.w2.ap, new C.BVH(bs.pos, bs.idx));
+    assert.ok(b2.lines.some(l => l.intoRoom2 && l.intoRoom2[2] > -15 - 1e-6 && l.intoRoom2[2] < -12.3), 'some lines land on the block');
+});
+
+test('a hit-and-miss intervention: louvres barely change "visible from any point" but halve the weighted figures', () => {
+    const r = run(scene({ slats: true }));
+    for (const d of [0, 1]) {
+        const a = base.s[d], b = r.s[d];
+        // Some line still gets through everywhere, so the any-point figures hardly move...
+        assert.ok(b.visible.total > 0.9 * a.visible.total, `any-point ${b.visible.total} vs ${a.visible.total}`);
+        assert.equal(b.worst.length, a.worst.length);
+        // ...while the weighted figures show the intervention.
+        assert.ok(b.weighted.total < 0.7 * a.weighted.total, `weighted ${b.weighted.total} vs ${a.weighted.total}`);
+        assert.ok(b.visibleHalf.total < 0.7 * a.visibleHalf.total, 'seen from half the window');
+        assert.ok(b.personWeighted.area < 0.9 * a.personWeighted.area, `person ${b.personWeighted.area} vs ${a.personWeighted.area}`);
+        assert.ok(b.worst.mean < 0.8 * a.worst.mean, `mean at the worst position ${b.worst.mean} vs ${a.worst.mean}`);
+    }
+});
+
+test('weighted figures never exceed the any-point figures, and an unobstructed scene is well above zero', () => {
+    for (const d of [0, 1]) {
+        const s = base.s[d];
+        assert.ok(s.weighted.total <= s.visible.total && s.visibleHalf.total <= s.visible.total);
+        assert.ok(s.weighted.total > 0.2 * s.visible.total);
+        assert.ok(s.worst.mean <= s.worst.length + 1e-9 && s.worst.mean > 0);
+        assert.ok(s.personWeighted.area <= s.personAny.area + 1e-9);
     }
 });
