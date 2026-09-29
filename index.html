@@ -163,6 +163,7 @@
                         </div>
                         <button class="btn" id="pick-w2-btn">Pick</button>
                     </div>
+                    <label class="muted" style="display:block; margin-top:6px; font-size:12px; cursor:pointer;"><input type="checkbox" id="tg-rooms-setup" checked> Show the picked rooms (IfcSpaces, ghosted)</label>
                     <div id="cmp-match" style="margin-top:6px;"></div>
                 </div>
             </div>
@@ -229,6 +230,7 @@
             <label><input type="checkbox" id="tg-bundle" checked> Sight-line bundle</label>
             <label><input type="checkbox" id="tg-person" checked> Worst-position person</label>
             <label><input type="checkbox" id="tg-model" checked> Model (ghosted)</label>
+            <label><input type="checkbox" id="tg-rooms" checked> Picked rooms (IfcSpaces)</label>
         </div>
         <div class="hud" id="fade-bar">
             <button class="btn" id="fade-a-btn">A</button>
@@ -976,6 +978,9 @@
         const DEFAULT_SETTINGS = { viewerGrid: 100, targetSub: 100, standGrid: 250, personHeight: 1.70, heightStep: 50, deadline: 60 };
         const DIR_COLOURS = { 1: 0x00CFC8, 2: 0xD4880F };
         const WINDOW_TYPES = ['IFCWINDOW', 'IFCWINDOWSTANDARDCASE', 'IFCDOOR', 'IFCDOORSTANDARDCASE'];
+        // Volumes, not things: always hidden, never block sight lines, never pickable.
+        // IfcSpaces are also kept as rooms, whichever stream they arrive in.
+        const HIDDEN_TYPES = ['IFCSPACE', 'IFCSPATIALZONE', 'IFCEXTERNALSPATIALELEMENT', 'IFCOPENINGELEMENT', 'IFCOPENINGSTANDARDCASE', 'IFCVIRTUALELEMENT'];
 
         // ─── STATE ───
         let scene, camera, renderer, controls;
@@ -996,6 +1001,7 @@
             showing: 'base',         // which model the setup view shows
             results: null,           // { scenarios: [...], stale }
             fadeT: 0,
+            showRooms: true,         // ghost the two picked IfcSpaces (all others are always hidden)
         };
         const resultCache = new Map();
         const surfaceCache = new Map();
@@ -1146,10 +1152,17 @@
                 ORIGIN = isFinite(mn[0]) ? [Math.round((mn[0] + mx[0]) / 2), Math.round(mn[1]), Math.round((mn[2] + mx[2]) / 2)] : [0, 0, 0];
             }
 
-            const model = { id: id, seq: ++modelSeq, fileName: file.name, group: new THREE.Group(), elements: new Map(), byGid: new Map(), spaces: [], windowCount: 0 };
+            const model = { id: id, seq: ++modelSeq, fileName: file.name, group: new THREE.Group(), elements: new Map(), byGid: new Map(), spaces: [], windowCount: 0, hidden: {} };
             model.group.name = 'model_' + id;
             for (const [eid, e] of raw) {
                 if (!e.verts.length || !e.idx.length) continue;
+                const meta = info(eid);
+                const T = meta.typeName.toUpperCase();
+                if (HIDDEN_TYPES.includes(T)) {
+                    if (T === 'IFCSPACE') spacesRaw.set(eid, e);
+                    else model.hidden[meta.typeName] = (model.hidden[meta.typeName] || 0) + 1;
+                    continue;
+                }
                 const pos = new Float32Array(e.verts.length);
                 const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
                 for (let j = 0; j < e.verts.length; j += 3) for (let k = 0; k < 3; k++) {
@@ -1163,7 +1176,6 @@
                 geo.setIndex(new THREE.BufferAttribute(new Uint32Array(e.idx), 1));
                 geo.computeVertexNormals();
                 const mesh = new THREE.Mesh(geo, MAT.solid);
-                const meta = info(eid);
                 const el = {
                     expressID: eid, globalId: meta.globalId, name: meta.name, typeName: meta.typeName,
                     isWindow: WINDOW_TYPES.includes(meta.typeName.toUpperCase()),
@@ -1227,6 +1239,8 @@
                 fn.textContent = file.name; fn.style.display = 'block';
                 const info = document.getElementById('model-info');
                 info.innerHTML = m.elements.size + ' elements, ' + m.windowCount + ' windows/doors, ' + m.spaces.length + ' IfcSpaces.'
+                    + ' IfcSpaces are hidden; only the two picked rooms are shown, faintly.'
+                    + (Object.keys(m.hidden).length ? ' Also hidden and ignored: ' + Object.entries(m.hidden).map(([t, n]) => n + ' ' + t).join(', ') + '.' : '')
                     + (m.failed ? ' <span class="warn">' + m.failed + ' element(s) could not be read and were skipped.</span>' : '')
                     + (m.spaces.length ? '' : ' <span class="err">No IfcSpaces: SightLine finds rooms from IfcSpaces, so it cannot run on this model.</span>');
                 offerRestore();
@@ -1423,7 +1437,7 @@
             for (const [k, w, e] of [[1, a.w1, a.e1], [2, a.w2, a.e2]]) {
                 if (!w) continue;
                 pickOverlay.add(apertureOutline(w.ap, DIR_COLOURS[k], 1));
-                if (w.room) pickOverlay.add(roomGhost(w.room, DIR_COLOURS[k], 0.14));
+                if (w.room && S.showRooms) pickOverlay.add(roomGhost(w.room, DIR_COLOURS[k], 0.14));
                 const lab = 'W' + k + ': ' + (e.name || 'window') + (w.room ? '  →  ' + spaceLabel(w.room) : '  →  no room found');
                 const s = makeLabel(lab, DIR_COLOURS[k]);
                 s.position.set(w.ap.c[0], w.ap.c[1] + w.ap.h / 2 + 0.5, w.ap.c[2]);
@@ -1856,13 +1870,14 @@
                 person.add(personMarker(d));
             }
             rooms.add(apertureOutline(r.a.w1.ap, DIR_COLOURS[1], 1), apertureOutline(r.a.w2.ap, DIR_COLOURS[2], 1));
-            rooms.add(roomGhost(r.a.w1.room, DIR_COLOURS[1], 0.04), roomGhost(r.a.w2.room, DIR_COLOURS[2], 0.04));
+            const spaces = new THREE.Group(); spaces.name = 'spaces';
+            spaces.add(roomGhost(r.a.w1.room, DIR_COLOURS[1], 0.04), roomGhost(r.a.w2.room, DIR_COLOURS[2], 0.04));
             for (const [k, w, e] of [[1, r.a.w1, r.a.e1], [2, r.a.w2, r.a.e2]]) {
                 const s = makeLabel('W' + k + ': ' + (e.name || 'window') + '\n' + spaceLabel(w.room), DIR_COLOURS[k], 0.8);
                 s.position.set(w.ap.c[0], w.ap.c[1] + w.ap.h / 2 + 0.6, w.ap.c[2]);
                 rooms.add(s);
             }
-            g.add(paint, person, bundle, rooms);
+            g.add(paint, person, bundle, rooms, spaces);
             return g;
         }
 
@@ -1911,6 +1926,7 @@
                     if (c.name === 'paint') c.visible = tg('tg-paint');
                     if (c.name === 'bundle') c.visible = tg('tg-bundle');
                     if (c.name === 'person') c.visible = tg('tg-person');
+                    if (c.name === 'spaces') c.visible = S.showRooms;
                 }
             }
             const showingKey = S.results.scenarios.length > 1 ? (t < 0.5 ? 'A' : 'B') : 'M';
@@ -2353,6 +2369,11 @@
                 loopStep();
             };
             for (const id of ['tg-paint', 'tg-bundle', 'tg-person', 'tg-model']) document.getElementById(id).onchange = () => applyFade(S.fadeT);
+            for (const id of ['tg-rooms', 'tg-rooms-setup']) document.getElementById(id).onchange = (e) => {
+                S.showRooms = e.target.checked;
+                document.getElementById('tg-rooms').checked = document.getElementById('tg-rooms-setup').checked = S.showRooms;
+                refreshDisplay();
+            };
             for (const id of Object.keys(SETTING_INPUTS)) document.getElementById(id).onchange = () => { readSettingInputs(); invalidateResults(); refreshAll(); };
             document.getElementById('save-session-btn').onclick = downloadSession;
             const sf = document.getElementById('session-file');
@@ -2371,7 +2392,7 @@
         window.SightLine = { state: S, runAnalysis: runAnalysis, handleModelFile: handleModelFile, handleComparisonFile: handleComparisonFile,
                              applySession: applySession, sessionObject: sessionObject, fadeTo: fadeTo, applyFade: applyFade,
                              lockView: lockView, startMode: startMode, refreshAll: refreshAll, analysePicks: analysePicks, scenarios: scenarios,
-                             get camera() { return camera; }, get controls() { return controls; }, get renderer() { return renderer; } };
+                             get camera() { return camera; }, get scene() { return scene; }, get controls() { return controls; }, get renderer() { return renderer; } };
 
         initMaterials();
         initThree();

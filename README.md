@@ -50,8 +50,10 @@ in the browser per file name and offered back when the same file is loaded again
   other window.
 - **Room.** The IfcSpace containing a point 300 mm behind the aperture centre (looking up to
   1 m in, for thick walls).
-- **Blockers.** Every element except the two picked windows, the IfcSpaces and anything
-  omitted. Reveals, cills, heads and every other window block.
+- **Blockers.** Every element except the two picked windows and anything omitted. Reveals,
+  cills, heads and every other window block. Volumes are never drawn and never block:
+  IfcSpace, IfcSpatialZone, IfcExternalSpatialElement, openings and virtual elements are
+  hidden automatically. The two picked rooms are shown as faint ghosts, with a toggle.
 - **Visibility.** Viewer points on a 100 mm grid over one aperture; target points on the
   other room's IfcSpace surfaces, subdivided to 100 mm and set 20 mm into the room. A target
   is seen from a viewer point when the segment between them passes through the other aperture

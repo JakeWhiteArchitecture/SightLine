@@ -16,6 +16,9 @@ Needs ifcopenshell (pip install ifcopenshell). Variants written:
     oblique.ifc     building 2 moved 2.5 m sideways
     deep_reveal.ifc building 2's front wall 0.6 m thick instead of 0.3 m
     new_window.ifc  base with window 2 replaced by a new element (new GlobalId)
+
+Every variant also has an IfcSpatialZone round the whole site, which must be
+hidden and must not block sight lines.
 """
 
 import os
@@ -80,7 +83,7 @@ class Builder:
     def element(self, storey, cls, name, key, *bounds):
         e = self.entity(cls, name, key)
         self.box(e, *bounds)
-        if cls == 'IfcSpace':
+        if cls in ('IfcSpace', 'IfcSpatialZone'):
             run('aggregate.assign_object', self.f, products=[e], relating_object=storey)
         else:
             run('spatial.assign_container', self.f, products=[e], relating_structure=storey)
@@ -126,6 +129,9 @@ def make(path, shift2=0.0, wall2_t=WALL_T, screen=False, window2_key='window'):
     if screen:
         st = b.f.by_type('IfcBuildingStorey')[0]
         b.element(st, 'IfcMember', 'Privacy screen', 'screen', -2.0, 6.1, -0.3, 6.0, 6.2, 2.0)
+    # A zone round the whole site. SightLine must hide it and never let it block.
+    st = b.f.by_type('IfcBuildingStorey')[0]
+    b.element(st, 'IfcSpatialZone', 'Site zone', 'zone', -3.0, -6.0, -0.5, 8.0, 19.0, 3.5)
     b.f.write(path)
 
 

@@ -104,7 +104,13 @@ async function main() {
 
     // ── 1. Model, picks, run ──
     await loadModel('base.ifc');
-    console.log('model:', await page.textContent('#model-info'));
+    const info = await page.textContent('#model-info');
+    console.log('model:', info);
+    // The site-wide IfcSpatialZone is hidden and out of the elements (so it can't block);
+    // IfcSpaces are rooms, never elements.
+    assert.match(info, /Also hidden and ignored: 1 IfcSpatialZone/);
+    assert.deepEqual(await state(() => [...SightLine.state.base.elements.values()].filter(e => /space|zone/i.test(e.typeName)).length), 0);
+    assert.equal(await state(() => SightLine.state.base.spaces.length), 2);
     await page.click('#pick-w1-btn');
     await clickElement('Window 1');
     assert.equal(await state(() => SightLine.state.mode), 'pick-w2', 'moves on to Window 2');
@@ -113,6 +119,12 @@ async function main() {
     console.log('W1:', w1, '\nW2:', w2);
     assert.match(w1, /Room: R1 Room 1/); assert.match(w2, /Room: R2 Room 2/);
     await shot('1-picked');
+    // Picked-room ghosts can be switched off.
+    const ghosts = () => page.evaluate(() => { let n = 0; SightLine.scene.traverse(o => { if (o.visible && o.isMesh && o.material && o.material.opacity === 0.14) n++; }); return n; });
+    assert.equal(await ghosts(), 2);
+    await page.click('#tg-rooms-setup');
+    assert.equal(await ghosts(), 0);
+    await page.click('#tg-rooms-setup');
     await run();
     const base = await figures();
     console.log('model run:', JSON.stringify(base[0].dirs));
