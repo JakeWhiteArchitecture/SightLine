@@ -163,6 +163,22 @@ async function main() {
     await shot('5-B');
     await page.click('#lock-btn');   // unlock
 
+    // The screen is in the way: its lines are counted, and there is no "not in the way" notice.
+    assert.match(table, /Stopped by the changed elements/);
+    assert.doesNotMatch(table, /stop none of the lines/);
+    assert.ok(await state(() => SightLine.state.results.scenarios[1].dirs[0].summary.changedBlocked) > 20, 'the screen stops a good share of the lines');
+
+    // ── 2b. A pergola overhead is not in the way: the tool says so, and nothing changes ──
+    await page.click('#cmp-remove-btn');
+    await loadComparison('shade.ifc');
+    await run();
+    const sh = await figures();
+    assert.deepEqual(sh[1].dirs, sh[0].dirs, 'an overhead shade changes no figure');
+    const shText = await page.textContent('#results-body');
+    assert.match(shText, /stop none of the lines between the two windows/);
+    assert.equal(await state(() => SightLine.state.results.scenarios[1].dirs[0].summary.changedBlocked), 0);
+    console.log('shade: not in the way, reported');
+
     // ── 3. A comparison whose window 2 has a new GlobalId: reported, then re-picked ──
     await page.click('#cmp-remove-btn');
     await loadComparison('new_window.ifc');

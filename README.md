@@ -79,6 +79,11 @@ in the browser per file name and offered back when the same file is loaded again
   window that sees it, the area seen from at least half the window, a person figure weighted
   the same way, and the average visible length at the worst position. The painted colours
   are the same share.
+- **Is the change in the way?** The table gives the share of lines between every point of one
+  window and every point of the other that get through, and lists what stops the rest. With a
+  comparison it also gives the share stopped by the changed elements themselves. If they stop
+  under 0.1% of the lines, SightLine says so: the change is not in the way of the view (an
+  overhead pergola, say, above the height the lines pass), so no figure can differ.
 - **Deadline.** The run is stopped cleanly at 60 s (setting), with a warning saying how far
   it got. Stage times are logged to the console.
 
@@ -105,7 +110,8 @@ The core (geometry, visibility, person measure, numbers) is the
 read that block straight out of the page and check it against the tests in the requirements:
 the square-on projection by hand, an oblique window, a screen between the windows, a deeper
 reveal, the three person cases, omitting, and deadline 0, plus furniture as a real surface,
-a model with no IfcSpaces, and a louvre screen against the weighted figures.
+a model with no IfcSpaces, a louvre screen against the weighted figures, and an overhead shade
+that stops none of the lines.
 
 `tests/e2e.js` drives the whole page in Chromium through Playwright on the models from
 `tools/make_test_ifc.py` (in `test-models/`): it picks the windows by clicking them, runs,

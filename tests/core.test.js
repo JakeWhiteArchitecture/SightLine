@@ -60,16 +60,22 @@ function scene(o = {}) {
     const b2 = building(o.shift2 || 0, 0, -12.0, -1, o.wall2 || 0.3, o.win2 || [0.9, 2.3]);
     // Window 1 centreline z = 0.15, Window 2 centreline z = -12 - wall2/2.
     const solids = b1.solids.concat(b2.solids);
+    const owner = solids.map(() => 0);           // owner 0: the buildings; 1 screen, 2 louvres, 3 block, 4 shade
+    const add = (box, who) => { solids.push(box); owner.push(who); };
     // A screen across the gap, 2 m high, halfway between the buildings.
-    if (o.screen) solids.push([-2, -0.3, -6.1, 6, 2.0, -6.0]);
+    if (o.screen) add([-2, -0.3, -6.1, 6, 2.0, -6.0], 1);
+    // A pergola-style shade: slats overhead, above every line between the two windows.
+    if (o.shade) for (let z = -8; z < -4; z += 0.4) add([-2, 2.8, z, 6, 2.9, z + 0.2], 4);
     // Louvres: 100 mm slats with 100 mm gaps across the gap, 2 m high, halfway between the buildings.
-    if (o.slats) for (let x = -2; x < 6; x += 0.2) solids.push([x, -0.3, -6.1, x + 0.1, 2.0, -6.0]);
+    if (o.slats) for (let x = -2; x < 6; x += 0.2) add([x, -0.3, -6.1, x + 0.1, 2.0, -6.0], 2);
     // A 1 m high block of furniture in the middle of room 2.
-    if (o.block) solids.push([1.4, 0, -16.0, 2.6, 1.0, -15.0]);
+    if (o.block) add([1.4, 0, -16.0, 2.6, 1.0, -15.0], 3);
     const tris = solids.flatMap(s => boxTris(...s));
     const pos = new Float32Array(tris.flat().flat());
     const idx = new Uint32Array(tris.length * 3).map((_, i) => i);
-    return { pos, idx, b1, b2 };
+    const owners = new Int32Array(tris.length);
+    owners.set(owner.flatMap(w => new Array(12).fill(w)));
+    return { pos, idx, owners, b1, b2 };
 }
 
 const SETTINGS = { viewer: 0.1, target: 0.1, stand: 0.25, height: 1.7, hstep: 0.05 };
@@ -80,7 +86,7 @@ function run(sc, opts = {}) {
     const pair = C.resolvePair(C.apertureFromPoints(sc.b1.windowPts), C.apertureFromPoints(sc.b2.windowPts), spaces);
     if (!opts.noSpaces) assert.ok(pair.w1.room && pair.w2.room, 'both rooms found');
     const job = {
-        blockPos: sc.pos, blockIdx: sc.idx, deadlineMs: opts.deadlineMs === undefined ? 1e9 : opts.deadlineMs,
+        blockPos: sc.pos, blockIdx: sc.idx, owners: sc.owners, deadlineMs: opts.deadlineMs === undefined ? 1e9 : opts.deadlineMs,
         viewerStep: st.viewer, targetSub: st.target, standStep: st.stand, personHeight: st.height, hStep: st.hstep,
         dirs: [
             { name: 'd0', viewer: pair.w1.ap, target: pair.w2.ap },
@@ -257,7 +263,8 @@ test('omitting: leaving the screen out increases every visible figure; nothing o
     const withScreen = scene({ screen: true });
     // The comparison made by omitting the screen: same geometry, screen left out of the BVH.
     const n = 12;
-    const omitted = { pos: withScreen.pos.slice(0, withScreen.pos.length - n * 9), idx: withScreen.idx.slice(0, withScreen.idx.length - n * 3), b1: withScreen.b1, b2: withScreen.b2 };
+    const omitted = { pos: withScreen.pos.slice(0, withScreen.pos.length - n * 9), idx: withScreen.idx.slice(0, withScreen.idx.length - n * 3),
+                      owners: withScreen.owners.slice(0, withScreen.owners.length - n), b1: withScreen.b1, b2: withScreen.b2 };
     const a = run(omitted), b = run(withScreen);
     for (const d of [0, 1]) {
         assert.deepEqual(FIGURES(a.s[d]), FIGURES(base.s[d]), 'omitted = never there');
@@ -314,4 +321,28 @@ test('weighted figures never exceed the any-point figures, and an unobstructed s
         assert.ok(s.worst.mean <= s.worst.length + 1e-9 && s.worst.mean > 0);
         assert.ok(s.personWeighted.area <= s.personAny.area + 1e-9);
     }
+});
+
+test('a shade above the sight lines stops none of them and changes nothing', () => {
+    const r = run(scene({ shade: true }));
+    for (const d of [0, 1]) {
+        assert.equal(r.res.dirs[d].blockedBy[4] || 0, 0, 'no line is stopped by the shade');
+        assert.equal(r.res.dirs[d].through, base.res.dirs[d].through);
+        assert.deepEqual(FIGURES(r.s[d]), FIGURES(base.s[d]));
+    }
+});
+
+test('lines stopped on the way are blamed on the element that stopped them', () => {
+    const r = run(scene({ screen: true }));
+    for (const d of [0, 1]) {
+        const R = r.res.dirs[d], B = base.res.dirs[d];
+        assert.ok(R.candidates > 10000 && R.candidates === B.candidates, 'the same lines are considered');
+        assert.ok((R.blockedBy[1] || 0) > 0.2 * R.candidates, `the screen stops a good share of them (${R.blockedBy[1]} of ${R.candidates})`);
+        assert.ok(R.through < B.through, 'fewer lines get through');
+        assert.ok(R.through + Object.values(R.blockedBy).reduce((a, b) => a + b, 0) === R.candidates, 'every line is either through or blamed');
+        assert.equal(B.blockedBy[1] || 0, 0, 'nothing is blamed on the screen when it is not there');
+    }
+    // Louvres stop about half of what the solid screen does.
+    const l = run(scene({ slats: true }));
+    assert.ok(l.res.dirs[0].blockedBy[2] > 0.3 * r.res.dirs[0].blockedBy[1] && l.res.dirs[0].blockedBy[2] < 0.8 * r.res.dirs[0].blockedBy[1]);
 });

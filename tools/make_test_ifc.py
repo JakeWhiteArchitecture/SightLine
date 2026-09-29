@@ -17,6 +17,7 @@ Needs ifcopenshell (pip install ifcopenshell). Variants written:
     deep_reveal.ifc building 2's front wall 0.6 m thick instead of 0.3 m
     new_window.ifc  base with window 2 replaced by a new element (new GlobalId)
     no_spaces.ifc   base with no IfcSpaces at all
+    shade.ifc       base plus a pergola overhead, above every sight line
 
 Every variant also has an IfcSpatialZone round the whole site, which must be
 hidden and must not block sight lines.
@@ -124,13 +125,19 @@ def add_building(b, n, x0, front_y, facing, wall_t, window_key='window', with_sp
         sp.LongName = 'Room %d' % n
 
 
-def make(path, shift2=0.0, wall2_t=WALL_T, screen=False, window2_key='window', spaces=True):
+def make(path, shift2=0.0, wall2_t=WALL_T, screen=False, window2_key='window', spaces=True, shade=False):
     b = Builder()
     add_building(b, 1, 0.0, WALL_T, -1, WALL_T, with_space=spaces)          # room at y < 0, outer face y = 0.3
     add_building(b, 2, shift2, WALL_T + GAP, +1, wall2_t, window2_key, with_space=spaces)
     if screen:
         st = b.f.by_type('IfcBuildingStorey')[0]
         b.element(st, 'IfcMember', 'Privacy screen', 'screen', -2.0, 6.1, -0.3, 6.0, 6.2, 2.0)
+    if shade:
+        # A pergola: ten slats overhead, above every line between the two windows.
+        st = b.f.by_type('IfcBuildingStorey')[0]
+        for k in range(10):
+            y = 2.0 + 0.4 * k
+            b.element(st, 'IfcMember', 'Pergola slat %d' % (k + 1), 'shade%d' % k, -2.0, y, 2.8, 6.0, y + 0.2, 2.9)
     # A zone round the whole site. SightLine must hide it and never let it block.
     st = b.f.by_type('IfcBuildingStorey')[0]
     b.element(st, 'IfcSpatialZone', 'Site zone', 'zone', -3.0, -6.0, -0.5, 8.0, 19.0, 3.5)
@@ -145,6 +152,7 @@ def main(out_dir):
     make(os.path.join(out_dir, 'deep_reveal.ifc'), wall2_t=0.6)
     make(os.path.join(out_dir, 'new_window.ifc'), window2_key='window-new')
     make(os.path.join(out_dir, 'no_spaces.ifc'), spaces=False)
+    make(os.path.join(out_dir, 'shade.ifc'), shade=True)
     print('Written to', out_dir)
 
 

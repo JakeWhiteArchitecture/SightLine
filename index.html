@@ -291,6 +291,7 @@
                     const bx = positions[i1], by = positions[i1+1], bz = positions[i1+2];
                     const cx = positions[i2], cy = positions[i2+1], cz = positions[i2+2];
                     tris[i] = {
+                        id: i,
                         ax, ay, az, bx, by, bz, cx, cy, cz,
                         centX: (ax + bx + cx) / 3,
                         centY: (ay + by + cy) / 3,
@@ -316,14 +317,16 @@
                 const count = end - start;
 
                 if (count <= 8) {
-                    const buf = new Float64Array(count * 9);
+                    const buf = new Float64Array(count * 9), ids = new Int32Array(count);
                     for (let i = start; i < end; i++) {
                         const t = tris[i], o = (i - start) * 9;
+                        ids[i - start] = t.id;
                         buf[o] = t.ax; buf[o+1] = t.ay; buf[o+2] = t.az;
                         buf[o+3] = t.bx; buf[o+4] = t.by; buf[o+5] = t.bz;
                         buf[o+6] = t.cx; buf[o+7] = t.cy; buf[o+8] = t.cz;
                     }
                     node.tris = buf;
+                    node.ids = ids;
                     node.triCount = count;
                     return node;
                 }
@@ -351,7 +354,7 @@
                 const box = new Float64Array(N * 6), right = new Int32Array(N), first = new Int32Array(N), count = new Int32Array(N);
                 let triTotal = 0;
                 for (const n of nodes) if (n.tris) triTotal += n.triCount;
-                const tri = new Float64Array(triTotal * 9);
+                const tri = new Float64Array(triTotal * 9), ids = new Int32Array(triTotal);
                 let t = 0;
                 nodes.forEach((n, i) => {
                     box.set([n.minX, n.minY, n.minZ, n.maxX, n.maxY, n.maxZ], i * 6);
@@ -359,13 +362,14 @@
                         first[i] = t; count[i] = n.triCount;
                         for (let k = 0; k < n.triCount; k++, t++) {
                             const s = n.tris, o = k * 9, d = t * 9;
+                            ids[t] = n.ids[k];
                             tri[d] = s[o]; tri[d+1] = s[o+1]; tri[d+2] = s[o+2];
                             tri[d+3] = s[o+3] - s[o]; tri[d+4] = s[o+4] - s[o+1]; tri[d+5] = s[o+5] - s[o+2];
                             tri[d+6] = s[o+6] - s[o]; tri[d+7] = s[o+7] - s[o+1]; tri[d+8] = s[o+8] - s[o+2];
                         }
                     } else right[i] = n.rightIndex;
                 });
-                this.flat = { box: box, right: right, first: first, count: count, tri: tri, stack: new Int32Array(256) };
+                this.flat = { box: box, right: right, first: first, count: count, tri: tri, ids: ids, stack: new Int32Array(256) };
             }
 
             segmentBlocked(ox, oy, oz, dx, dy, dz) {
@@ -466,6 +470,9 @@
                 }
                 return best === Infinity ? -1 : best;
             }
+
+            // The index (in the order given to the constructor) of a triangle found by closestHit.
+            idAt(slot) { return this.flat.ids[slot]; }
 
             // The three corners of a triangle found by closestHit (this.lastSlot).
             triangleAt(slot) {
@@ -756,21 +763,31 @@
         // mayBeSeen says a point on it could be seen, and oriented towards the
         // viewer, so surfaces the lines only graze at their far edges are
         // still measured to their true extent.
-        function discoverSurface(bvh, vAp, tAp, maxEdge, viewerStep) {
+        // owners (optional): the element each triangle of the blocking geometry
+        // belongs to, so lines stopped on the way can be blamed on it.
+        function discoverSurface(bvh, vAp, tAp, maxEdge, viewerStep, owners) {
             const V = edgeGrid(vAp, Math.max(viewerStep, 0.1), 12), T = edgeGrid(tAp, 0.05, 40);
             const nV = V.length / 3, nT = T.length / 3;
             const tn = tAp.n, tCorners = apertureCorners(tAp);
             const hits = new Map();
-            let landed = 0;
+            let landed = 0, candidates = 0, through = 0;
+            const blockedBy = {};
             const box = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
             for (let i = 0; i < nV; i++) {
                 const ax = V[i * 3], ay = V[i * 3 + 1], az = V[i * 3 + 2];
                 for (let j = 0; j < nT; j++) {
                     const dx = T[j * 3] - ax, dy = T[j * 3 + 1] - ay, dz = T[j * 3 + 2] - az;
                     if (dx * tn[0] + dy * tn[1] + dz * tn[2] >= 0) continue;
-                    if (bvh.segmentBlocked(ax, ay, az, dx, dy, dz)) continue;
-                    const t = bvh.closestHit(ax, ay, az, dx, dy, dz, 1 + 1e-4);
+                    candidates++;
+                    // The nearest thing on the line: before the far aperture it stops the line.
+                    let t = bvh.closestHit(ax, ay, az, dx, dy, dz, 1e-6);
+                    if (t > 0 && t < 1 - 1e-6) {
+                        if (owners) { const o = owners[bvh.idAt(bvh.lastSlot)]; blockedBy[o] = (blockedBy[o] || 0) + 1; }
+                        continue;
+                    }
+                    through++;
                     if (t < 0) continue;
+                    if (t <= 1 + 1e-4) { t = bvh.closestHit(ax, ay, az, dx, dy, dz, 1 + 1e-4); if (t < 0) continue; }
                     landed++;
                     const p = [ax + dx * t, ay + dy * t, az + dz * t];
                     let h = hits.get(bvh.lastSlot);
@@ -823,7 +840,8 @@
                     tris.push(sub);
                 }
             }
-            return { tris: tris, landed: landed, surfaces: hits.size, box: landed ? box : null, revealDepth: revealD };
+            return { tris: tris, landed: landed, surfaces: hits.size, box: landed ? box : null, revealDepth: revealD,
+                     candidates: candidates, through: through, blockedBy: blockedBy };
         }
 
         // Shared-vertex surface from subdivided triangles: one vertex per
@@ -987,7 +1005,8 @@
 
         // ─── THE RUN ───
         // job = { blockPos, blockIdx, deadlineMs, viewerStep, targetSub, standStep,
-        //         personHeight, hStep, dirs: [{ name, viewer, target }] }  (metres)
+        //         personHeight, hStep, dirs: [{ name, viewer, target }],
+        //         owners? }  (metres; owners[i] = element of triangle i, for blame)
         // For each direction it finds the surfaces the sight lines land on, the
         // standing positions, and then, for every surface point and person
         // point, the share of viewer points that see it: fraction (0..1; -2 not
@@ -1007,7 +1026,7 @@
                     surface: { positions: new Float32Array(0), normals: new Float32Array(0), index: new Uint32Array(0),
                                cats: new Uint8Array(0), areas: new Float32Array(0), vertexCount: 0 },
                     fraction: new Float32Array(0), standing: new Float64Array(0), nH: nH, hStep: job.personHeight / nH,
-                    personVis: new Int8Array(0), personShare: new Float32Array(0), landed: 0, surfaces: 0, revealDepth: 0,
+                    personVis: new Int8Array(0), personShare: new Float32Array(0), landed: 0, surfaces: 0, revealDepth: 0, candidates: 0, through: 0, blockedBy: {},
                 });
             }
             const overDeadline = () => now() - t0 >= deadline;
@@ -1023,7 +1042,7 @@
                 if (overDeadline()) { res.stopped = { dir: di, part: 'finding the surfaces', done: 0, total: 0 }; return res; }
                 const d = job.dirs[di], out = res.dirs[di];
                 t = now();
-                const disc = discoverSurface(bvh, d.viewer, d.target, job.targetSub, job.viewerStep);
+                const disc = discoverSurface(bvh, d.viewer, d.target, job.targetSub, job.viewerStep, job.owners);
                 const surf = buildSurfaceFromSubTris(disc.tris);
                 const standing = deriveStanding(bvh, d.target, disc.box, job.standStep, job.personHeight);
                 const pp = personPoints(standing, job.personHeight, job.hStep);
@@ -1034,6 +1053,7 @@
                 out.personVis = new Int8Array(pp.points.length / 3).fill(-1);
                 out.personShare = new Float32Array(pp.points.length / 3).fill(-1);
                 out.landed = disc.landed; out.surfaces = disc.surfaces; out.revealDepth = disc.revealDepth;
+                out.candidates = disc.candidates; out.through = disc.through; out.blockedBy = disc.blockedBy;
                 const grid = apertureGrid(d.viewer, job.viewerStep);
                 res.viewerCounts.push(grid.count);
                 prep.push({ samples: surf.samples, persons: pp.points, grid: grid, tCorners: apertureCorners(d.target) });
@@ -1159,6 +1179,7 @@
                 personWeighted: { area: personEquiv, pct: fa > 0 ? personEquiv / fa * 100 : null },
                 standingCount: nP, standingReached: reached,
                 targetsReached: reachedT, targetCount: s.vertexCount,
+                throughPct: o.candidates ? o.through / o.candidates * 100 : null,
                 worst: worst,
             };
         }
@@ -1778,16 +1799,17 @@
                 nv += el.mesh.geometry.attributes.position.array.length;
                 ni += el.mesh.geometry.index.array.length;
             }
-            const pos = new Float32Array(nv), idx = new Uint32Array(ni);
+            const pos = new Float32Array(nv), idx = new Uint32Array(ni), owners = new Int32Array(ni / 3);
             let po = 0, io = 0;
-            for (const el of use) {
+            use.forEach((el, e) => {
                 const p = el.mesh.geometry.attributes.position.array, ix = el.mesh.geometry.index.array;
                 pos.set(p, po);
                 const base = po / 3;
                 for (let i = 0; i < ix.length; i++) idx[io + i] = ix[i] + base;
+                owners.fill(e, io / 3, (io + ix.length) / 3);
                 po += p.length; io += ix.length;
-            }
-            return { pos: pos, idx: idx, count: use.length };
+            });
+            return { pos: pos, idx: idx, count: use.length, owners: owners, els: use };
         }
 
         function prepareScenario(sc) {
@@ -1806,7 +1828,7 @@
             const blockers = blockerArrays(sc.model, skip);
             const prepMs = performance.now() - t0;
             const job = {
-                blockPos: blockers.pos, blockIdx: blockers.idx,
+                blockPos: blockers.pos, blockIdx: blockers.idx, owners: blockers.owners,
                 deadlineMs: st.deadline * 1000,
                 viewerStep: st.viewerGrid / 1000, targetSub: st.targetSub / 1000, standStep: st.standGrid / 1000,
                 personHeight: st.personHeight, hStep: st.heightStep / 1000,
@@ -1815,7 +1837,7 @@
                     { name: 'Room 1 from Window 2', viewer: a.w2.ap, target: a.w1.ap },
                 ],
             };
-            return { sc: sc, a: a, job: job, prepMs: prepMs, blockerCount: blockers.count };
+            return { sc: sc, a: a, job: job, prepMs: prepMs, blockerCount: blockers.count, els: blockers.els };
         }
 
         function runJob(job, onProgress) {
@@ -1862,9 +1884,16 @@
                     surface: r.surface, fraction: r.fraction, personVis: r.personVis, personShare: r.personShare,
                     standing: r.standing, nH: r.nH, hStep: r.hStep, standStep: st.standGrid / 1000,
                     viewerAp: d.viewerAp, targetAp: d.targetAp, totals: totals,
+                    candidates: r.candidates, through: r.through,
                 });
+                // Which elements stop the lines between the two openings, and how much of that is the change.
+                const cand = r.candidates || 0;
+                const blockers = Object.entries(r.blockedBy || {}).map(([o, n]) => ({ el: prep.els[+o], rays: n, pct: cand ? n / cand * 100 : 0 }))
+                    .filter(b => b.el).sort((x, y) => y.rays - x.rays);
+                const isChanged = (el) => S.comparison === 'upload' ? !!el.changed : S.comparison === 'omit' ? S.omit.includes(el.globalId) : false;
+                summary.changedBlocked = S.comparison ? blockers.filter(b => isChanged(b.el)).reduce((a, b) => a + b.pct, 0) : undefined;
                 return Object.assign(d, { fraction: r.fraction, personVis: r.personVis, summary: summary, surface: r.surface, nH: r.nH, hStep: r.hStep,
-                                          landed: r.landed, surfaces: r.surfaces });
+                                          landed: r.landed, surfaces: r.surfaces, blockers: blockers.slice(0, 5) });
             });
             return {
                 key: prep.sc.key, model: prep.sc.model, a: a, dirs: dirs,
@@ -2261,6 +2290,10 @@
                 { label: 'Visible total, weighted', value: s => s.weighted.total,
                   text: s => fmtArea(s.weighted.total) + '<span class="sub">each spot counted by the share of the window that sees it</span>', unit: 'm²' },
                 { label: 'Seen from at least half the window', value: s => s.visibleHalf.total, text: s => fmtArea(s.visibleHalf.total), unit: 'm²' },
+                { label: 'Lines between the two windows that get through', value: s => s.throughPct,
+                  text: s => s.throughPct == null ? '—' : s.throughPct.toFixed(1) + '%' + '<span class="sub">of the lines from every point of one window to every point of the other</span>', unit: '%' },
+                { label: 'Stopped by the changed elements', onlyCompare: true, value: s => s.changedBlocked,
+                  text: s => s.changedBlocked == null ? '—' : s.changedBlocked.toFixed(2) + '%' + '<span class="sub">of those lines</span>', unit: '%' },
                 { label: 'Centre to centre', value: s => s.centreDist, text: s => fmtMm(s.centreDist), unit: 'mm', scale: 1000 },
                 { label: 'Angle off square at Window ' + tk, value: s => s.angleOffSquare, text: s => s.angleOffSquare.toFixed(1) + '°', unit: '°' },
                 Object.assign({ label: 'Floor where any part of a person is visible' }, area(s => s.personAny)),
@@ -2321,12 +2354,22 @@
                 if (scs.length > 1) html += '<th>Change (B against A)</th>';
                 html += '</tr>';
                 for (const row of numberRows(di)) {
+                    if (row.onlyCompare && scs.length < 2) continue;
                     html += '<tr><td>' + row.label + '</td>';
                     for (const r of scs) html += '<td data-key="' + r.key + '">' + row.text(r.dirs[di].summary) + '</td>';
                     if (scs.length > 1) html += '<td>' + changeCell(row, scs[0].dirs[di].summary, scs[1].dirs[di].summary) + '</td>';
                     html += '</tr>';
                 }
                 html += '</table>';
+                for (const r of scs) {
+                    const bl = r.dirs[di].blockers || [];
+                    if (bl.length) html += '<div class="muted" style="font-size:11px; margin-top:3px;">' + (scs.length > 1 ? esc(r.key === 'M' ? 'Model' : r.label) + ': ' : '')
+                        + 'lines are stopped by ' + bl.slice(0, 4).map(b => esc(b.el.name || '(unnamed)') + ' (' + esc(b.el.typeName) + ') ' + b.pct.toFixed(1) + '%').join(', ') + '</div>';
+                }
+            }
+            // Is the change even in the way? Say so plainly when it is not.
+            if (scs.length > 1 && scs[1].dirs.every(d => d.summary.changedBlocked != null && d.summary.changedBlocked < 0.1)) {
+                html = '<div class="notice">The changed elements stop <b>none</b> of the lines between the two windows (under 0.1%). They are not in the way of the view, so this comparison cannot show a difference, whatever else they do (shading the sun, for example). Check that they sit between the windows, at the height the sight lines pass.</div>' + html;
             }
             const vc = scs[0].viewerCounts;
             html += '<div class="muted" style="margin-top:6px; font-size:11px;">Viewer points per window: ' + (vc || []).join(' and ') + '. Surfaces are found by the sight lines and measured on a ' + S.settings.targetSub + ' mm subdivision; standing grid ' + S.settings.standGrid + ' mm; person ' + S.settings.personHeight.toFixed(2) + ' m tested every ' + S.settings.heightStep + ' mm.</div>';
