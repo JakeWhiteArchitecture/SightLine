@@ -1,21 +1,15 @@
 """
-SunForm — Sun Hours Analysis Tool
+SightLine: overlooking between two windows.
 
-Minimal Flask server — just serves the frontend.
-All analysis runs client-side in the browser.
+Minimal Flask server: it only serves the frontend. All analysis runs
+client-side in the browser.
 """
 
+from flask import Flask, make_response, render_template
 import os
-
-from flask import Flask, make_response, render_template, send_from_directory
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=ROOT)
-
-
-@app.route("/sunform-logo.png")
-def logo():
-    return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "sunform-logo.png")
 
 
 @app.route("/")
