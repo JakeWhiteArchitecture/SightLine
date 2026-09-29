@@ -22,15 +22,15 @@ ray casting, `subdivideToMaxEdge` and its colour ramp.
 
 ## Using it
 
-1. **Model.** Drop the IFC with both buildings in it. It needs IfcSpaces: rooms are found
-   from them.
+1. **Model.** Drop the IFC with both buildings in it. IfcSpaces are not needed (see *How it
+   works*); where they exist they add the room names and the percentage figures.
 2. **Comparison (optional).** *Upload here* a second IFC of the same scheme, or *click here to
    omit elements from the model* and click the elements to leave out. **A is always the
    existing, B always with the intervention**: an uploaded comparison is B; with the omit
    route the model as uploaded is B and the version with the elements left out is A. Both
    labels can be edited.
 3. **Windows.** Pick Window 1 and Window 2 (an IfcWindow or a glazed IfcDoor). SightLine
-   outlines each aperture, finds the IfcSpace behind it and names both. Picks are kept by
+   outlines each aperture and, if there is an IfcSpace behind it, names the room. Picks are kept by
    GlobalId, so the same windows are found in an uploaded comparison; one that is missing is
    reported, with a button to pick it again in the comparison.
 4. **Run.** Both directions, for the model and the comparison.
@@ -48,21 +48,37 @@ in the browser per file name and offered back when the same file is loaded again
   plane through the centreline of its frame depth. The wall plane is the horizontal direction
   across which the window element is thinnest. The normal points out of the room, towards the
   other window.
-- **Room.** The IfcSpace containing a point 300 mm behind the aperture centre (looking up to
-  1 m in, for thick walls).
+- **Surfaces.** Found from the model, not from a room. Lines run from a spread of points on one
+  aperture through a 50 mm grid on the other; every line that gets through unblocked lands on
+  the first surface beyond the opening. Those surfaces (floor, walls, ceiling, and furniture
+  where it is modelled) are cut up to 100 mm wherever a point on them could be seen from the
+  viewing aperture through the other, which is worked out exactly, so the far edge of a visible
+  patch is not left to chance. Up-facing surfaces count as floor (cills and table tops too),
+  down-facing as ceiling, the rest as walls. The opening's own jambs, head and cill are not
+  measured.
 - **Blockers.** Every element except the two picked windows and anything omitted. Reveals,
   cills, heads and every other window block. Volumes are never drawn and never block:
   IfcSpace, IfcSpatialZone, IfcExternalSpatialElement, openings and virtual elements are
-  hidden automatically. The two picked rooms are shown as faint ghosts, with a toggle.
-- **Visibility.** Viewer points on a 100 mm grid over one aperture; target points on the
-  other room's IfcSpace surfaces, subdivided to 100 mm and set 20 mm into the room. A target
-  is seen from a viewer point when the segment between them passes through the other aperture
-  and nothing blocks it. Each target gets the share of viewer points that see it. Points in
-  the room's own window opening (the glass seen from inside) are not counted.
-- **Person.** At every standing position on a 250 mm grid over the floor, points every 50 mm
-  up to 1.70 m are tested the same way. The visible length and its kind (head down, feet up,
-  middle band or whole person) are reported at the worst position, which is marked in the
-  view with a figure, the visible part highlighted and dimensioned.
+  hidden automatically.
+- **IfcSpaces (optional).** If there is one behind a window, it names the room, is shown as a
+  faint ghost (with a toggle), and supplies the room's floor and surface areas for the
+  "% of floor / walls / ceiling" figures. Without one those figures are left out.
+- **Visibility.** Viewer points on a 100 mm grid over one aperture. A surface point is seen
+  from a viewer point when the segment between them passes through the other aperture and
+  nothing blocks it. Each point gets the share of viewer points that see it, and is painted
+  as a 10 mm skin coloured by that share.
+- **Person.** Standing positions are found from the model: a 250 mm grid over the plan
+  footprint of the sight lines, on the room side of the window and in line of sight of it,
+  with a floor found by dropping a line down and clear head-room. Points every 50 mm up to
+  1.70 m are tested the same way. The visible length and its kind (head down, feet up, middle
+  band or whole person) are reported at the worst position, which is marked in the view with
+  a figure, the visible part highlighted and dimensioned.
+- **Hit-and-miss interventions.** "Visible" means seen from at least one point of the window,
+  the worst case. A louvre or a perforated screen leaves that almost unchanged, so the table
+  also gives the weighted figures: the visible area with each spot counted by the share of the
+  window that sees it, the area seen from at least half the window, a person figure weighted
+  the same way, and the average visible length at the worst position. The painted colours
+  are the same share.
 - **Deadline.** The run is stopped cleanly at 60 s (setting), with a warning saying how far
   it got. Stage times are logged to the console.
 
@@ -88,7 +104,8 @@ The core (geometry, visibility, person measure, numbers) is the
 `<script id="sightline-core">` block in `index.html`, which the Web Worker also runs. The tests
 read that block straight out of the page and check it against the tests in the requirements:
 the square-on projection by hand, an oblique window, a screen between the windows, a deeper
-reveal, the three person cases, omitting, and deadline 0.
+reveal, the three person cases, omitting, and deadline 0, plus furniture as a real surface,
+a model with no IfcSpaces, and a louvre screen against the weighted figures.
 
 `tests/e2e.js` drives the whole page in Chromium through Playwright on the models from
 `tools/make_test_ifc.py` (in `test-models/`): it picks the windows by clicking them, runs,
@@ -103,12 +120,12 @@ node tests/e2e.js                  # VENDOR_DIR=... where the CDNs are blocked (
 
 ## Limitations
 
-- Models without IfcSpaces are not supported.
 - Only the picked pair of windows is considered; other windows in the rooms are not.
 - Frames and glazing bars are not modelled (the picked windows are ignored entirely), so
   results are slightly conservative.
-- If an IfcSpace's boundary sits inside a wall, floor or ceiling by more than 20 mm, the
-  points on that surface start inside the element and read as not visible.
+- Standing positions stand on whatever surface is found below the window's height, so a
+  modelled table top or shelf can be stood on. Rooms that are not in line of sight of the
+  window at the window's height (round a corner) are not covered.
 - No IFC, DXF or image export: the 3D view and the numbers are the outputs.
 
 ## Project layout
@@ -120,7 +137,7 @@ node tests/e2e.js                  # VENDOR_DIR=... where the CDNs are blocked (
 | `tests/core.test.js`     | Node tests of the analysis core                                |
 | `tests/e2e.js`           | Browser test through Playwright                                |
 | `tools/make_test_ifc.py` | Builds the test IFC models                                     |
-| `test-models/`           | Two facing buildings, plus screen, oblique, deep-reveal and new-window variants |
+| `test-models/`           | Two facing buildings, plus screen, oblique, deep-reveal, new-window and no-IfcSpaces variants |
 
 ## License
 
