@@ -95,7 +95,7 @@ async function main() {
         key: r.key, stopped: r.stopped,
         dirs: r.dirs.map(d => ({ total: d.summary.visible.total, floor: d.summary.visible.floor, walls: d.summary.visible.walls,
             ceiling: d.summary.visible.ceiling, any: d.summary.personAny.area, head: d.summary.personHead.area,
-            whole: d.summary.personWhole.area, worst: d.summary.worst ? d.summary.worst.length : 0,
+            whole: d.summary.personWhole.area, weighted: d.summary.weighted.total, worst: d.summary.worst ? d.summary.worst.length : 0,
             kind: d.summary.worst ? d.summary.worst.kind : 'none', dist: d.summary.centreDist })),
     })));
 
@@ -210,6 +210,25 @@ async function main() {
     const cl = await figures();
     assert.deepEqual(cl[0].dirs, cl[1].dirs, 'clearing the omit list makes the two identical');
 
+    // ── 4a. Session round trip ──
+    const sess = await state(() => SightLine.sessionObject());
+    assert.equal(sess.picks.w1.globalId, '05KFQBigzUcxbqSNDBc$MN');
+    assert.equal(sess.comparison.route, 'omit');
+
+    // ── 4b. No IfcSpaces at all: same surfaces, same figures, no room-based percentages ──
+    await loadModel('no_spaces.ifc');
+    assert.equal(await state(() => SightLine.state.base.spaces.length), 0);
+    await page.click('#pick-w1-btn');
+    await clickElement('Window 1');
+    await clickElement('Window 2');
+    assert.match(await page.textContent('#w1-detail'), /No IfcSpace behind this window/);
+    await run();
+    const ns = await figures();
+    assert.deepEqual(ns[0].dirs, base[0].dirs, 'the surfaces come from the sight lines, so the figures are the same');
+    const nsText = await page.textContent('#results-body');
+    assert.doesNotMatch(nsText, /of floor/);
+    console.log('no spaces: ok');
+
     // ── 5. Deadline 0 ──
     await page.click('details.settings summary');
     await page.fill('#set-deadline', '0');
@@ -218,11 +237,6 @@ async function main() {
     const dl = await page.textContent('#results-body');
     assert.match(dl, /stopped at the 0 s deadline/);
     console.log('deadline:', dl.slice(0, 200));
-
-    // ── 6. Session round trip ──
-    const sess = await state(() => SightLine.sessionObject());
-    assert.equal(sess.picks.w1.globalId, '05KFQBigzUcxbqSNDBc$MN');
-    assert.equal(sess.comparison.route, 'omit');
 
     const bad = logs.filter(l => !/GPU stall|swiftshader|WebGL/i.test(l));
     if (bad.length) { console.log('browser log:\n' + bad.join('\n')); }

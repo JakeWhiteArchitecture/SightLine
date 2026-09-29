@@ -16,6 +16,7 @@ Needs ifcopenshell (pip install ifcopenshell). Variants written:
     oblique.ifc     building 2 moved 2.5 m sideways
     deep_reveal.ifc building 2's front wall 0.6 m thick instead of 0.3 m
     new_window.ifc  base with window 2 replaced by a new element (new GlobalId)
+    no_spaces.ifc   base with no IfcSpaces at all
 
 Every variant also has an IfcSpatialZone round the whole site, which must be
 hidden and must not block sight lines.
@@ -90,7 +91,7 @@ class Builder:
         return e
 
 
-def add_building(b, n, x0, front_y, facing, wall_t, window_key='window'):
+def add_building(b, n, x0, front_y, facing, wall_t, window_key='window', with_space=True):
     """One room. front_y is the outer face of the front wall; facing +1 means the
     room lies at larger y than the front wall, -1 at smaller y."""
     st = b.storey('b%d' % n, 'Building %d' % n)
@@ -118,14 +119,15 @@ def add_building(b, n, x0, front_y, facing, wall_t, window_key='window'):
     b.element(st, 'IfcSlab', 'Roof', k + 'roof', X0 - WALL_T, oy0, ROOM_H, X1 + WALL_T, oy1, ROOM_H + 0.3)
     mid = (fy0 + fy1) / 2
     b.element(st, 'IfcWindow', 'Window %d' % n, k + window_key, wx0, mid - 0.035, WIN_Z0, wx1, mid + 0.035, WIN_Z1)
-    sp = b.element(st, 'IfcSpace', 'R%d' % n, k + 'space', X0, ry0, 0, X1, ry1, ROOM_H)
-    sp.LongName = 'Room %d' % n
+    if with_space:
+        sp = b.element(st, 'IfcSpace', 'R%d' % n, k + 'space', X0, ry0, 0, X1, ry1, ROOM_H)
+        sp.LongName = 'Room %d' % n
 
 
-def make(path, shift2=0.0, wall2_t=WALL_T, screen=False, window2_key='window'):
+def make(path, shift2=0.0, wall2_t=WALL_T, screen=False, window2_key='window', spaces=True):
     b = Builder()
-    add_building(b, 1, 0.0, WALL_T, -1, WALL_T)          # room at y < 0, outer face y = 0.3
-    add_building(b, 2, shift2, WALL_T + GAP, +1, wall2_t, window2_key)
+    add_building(b, 1, 0.0, WALL_T, -1, WALL_T, with_space=spaces)          # room at y < 0, outer face y = 0.3
+    add_building(b, 2, shift2, WALL_T + GAP, +1, wall2_t, window2_key, with_space=spaces)
     if screen:
         st = b.f.by_type('IfcBuildingStorey')[0]
         b.element(st, 'IfcMember', 'Privacy screen', 'screen', -2.0, 6.1, -0.3, 6.0, 6.2, 2.0)
@@ -142,6 +144,7 @@ def main(out_dir):
     make(os.path.join(out_dir, 'oblique.ifc'), shift2=2.5)
     make(os.path.join(out_dir, 'deep_reveal.ifc'), wall2_t=0.6)
     make(os.path.join(out_dir, 'new_window.ifc'), window2_key='window-new')
+    make(os.path.join(out_dir, 'no_spaces.ifc'), spaces=False)
     print('Written to', out_dir)
 
 
